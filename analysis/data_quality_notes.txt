@@ -1,0 +1,7 @@
+DATA TYPE COMPATIBILITY NOTE
+
+During development, a date data type mismatch was identified between the encounter table schema and the sample data. The column definition did not initially match the date and time values provided in the sample inserts.
+
+The schema and sample data were reviewed, and the column definition was corrected to ensure compatibility with the source values. This allowed the sample data to be inserted and the analytical queries to execute correctly.
+
+This correction is important because date and time values are used in monthly encounter reporting, 30-day readmission calculations, and revenue analysis. Consistent date and time data types help ensure that date comparisons and reporting logic behave as expected.
