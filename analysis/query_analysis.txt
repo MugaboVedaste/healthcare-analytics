@@ -1,0 +1,52 @@
+QUESTION 1: Monthly Encounters by Specialty
+
+SQL Query:
+
+```sql
+SELECT
+    YEAR(e.encounter_date) AS encounter_year,
+    MONTH(e.encounter_date) AS encounter_month,
+    s.specialty_name,
+    e.encounter_type,
+    COUNT(DISTINCT e.encounter_id) AS total_encounters,
+    COUNT(DISTINCT e.patient_id) AS unique_patients
+FROM encounters AS e
+JOIN providers AS p
+    ON e.provider_id = p.provider_id
+JOIN specialties AS s
+    ON p.specialty_id = s.specialty_id
+GROUP BY
+    YEAR(e.encounter_date),
+    MONTH(e.encounter_date),
+    s.specialty_name,
+    e.encounter_type
+ORDER BY
+    encounter_year,
+    encounter_month,
+    s.specialty_name,
+    e.encounter_type;
+```
+
+Schema Analysis:
+
+- Tables joined: `encounters`, `providers`, `specialties`.
+- Number of joins: 2.
+- Join path: `encounters → providers → specialties`.
+- Aggregations: Counts distinct encounters and distinct patients.
+- Grouping: Year, month, specialty, and encounter type.
+- Indexes used: The execution plan shows an index scan on `providers.specialty_id`, primary-key lookups on `specialties`, and index lookups on `encounters.provider_id`.
+
+Performance:
+
+- Execution time: Approximately 0.123 milliseconds (0.000123 seconds).
+- Actual result rows: 4.
+- Estimated rows: The plan estimated approximately 3 rows for the provider scan and approximately 3 rows entering the first nested-loop join. These are estimates, not a count of all rows scanned.
+- Execution method: MySQL `EXPLAIN ANALYZE`.
+
+Bottleneck Identified:
+
+The query combines three normalized tables and performs joins before grouping the results. MySQL then sorts the grouped data and calculates distinct counts for encounters and patients. These operations are inexpensive with the current small sample dataset, as the measured execution time was approximately 0.123 milliseconds. However, as the number of encounters and patients increases, joins, sorting, grouping, and distinct-count calculations may require more processing time and memory.
+
+Optimization Opportunity:
+
+A star schema can simplify analytical queries by organizing encounter measures in a central fact table and exposing specialty, date, patient, and encounter-type attributes through dimensions. Appropriate indexes and pre-aggregated measures may reduce query work, depending on the final schema and data volume.

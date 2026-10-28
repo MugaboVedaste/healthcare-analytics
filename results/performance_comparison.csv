@@ -1,0 +1,11 @@
+EXPLAIN
+"-> Group aggregate: count(distinct encounters.encounter_id), count(distinct encounters.patient_id)  (actual time=0.11..0.123 rows=4 loops=1)
+    -> Sort: encounter_year, encounter_month, s.specialty_name, e.encounter_type  (actual time=0.102..0.103 rows=4 loops=1)
+        -> Stream results  (cost=2.65 rows=3) (actual time=0.0631..0.0817 rows=4 loops=1)
+            -> Nested loop inner join  (cost=2.65 rows=3) (actual time=0.0563..0.0728 rows=4 loops=1)
+                -> Nested loop inner join  (cost=1.6 rows=3) (actual time=0.0423..0.0493 rows=3 loops=1)
+                    -> Filter: (p.specialty_id is not null)  (cost=0.55 rows=3) (actual time=0.0273..0.029 rows=3 loops=1)
+                        -> Covering index scan on p using specialty_id  (cost=0.55 rows=3) (actual time=0.0266..0.028 rows=3 loops=1)
+                    -> Single-row index lookup on s using PRIMARY (specialty_id=p.specialty_id)  (cost=0.283 rows=1) (actual time=0.00607..0.00613 rows=1 loops=3)
+                -> Index lookup on e using provider_id (provider_id=p.provider_id)  (cost=0.283 rows=1) (actual time=0.00593..0.00717 rows=1.33 loops=3)
+"
