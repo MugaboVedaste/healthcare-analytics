@@ -168,3 +168,56 @@ The query uses a self-join on `encounters` to identify subsequent encounters for
 Optimization Opportunity:
 
 A composite index on `(patient_id, encounter_date)` may improve the search for subsequent encounters belonging to the same patient within the 30-day window. Its effectiveness should be verified using `EXPLAIN ANALYZE`. A star schema may also support analytical reporting by organizing encounter information in a central fact table with relevant dimensions. Any performance improvement must be measured against the original OLTP query.
+
+QUESTION 4: Revenue by Specialty and Month
+
+SQL Query:
+
+```sql
+SELECT
+    YEAR(b.claim_date) AS claim_year,
+    MONTH(b.claim_date) AS claim_month,
+    s.specialty_name,
+    SUM(b.allowed_amount) AS total_revenue,
+    COUNT(DISTINCT b.billing_id) AS total_claims
+FROM billing AS b
+JOIN encounters AS e
+    ON b.encounter_id = e.encounter_id
+JOIN providers AS p
+    ON e.provider_id = p.provider_id
+JOIN specialties AS s
+    ON p.specialty_id = s.specialty_id
+GROUP BY
+    YEAR(b.claim_date),
+    MONTH(b.claim_date),
+    s.specialty_id,
+    s.specialty_name
+ORDER BY
+    claim_year,
+    claim_month,
+    s.specialty_name;
+```
+
+Schema Analysis:
+
+- Tables joined: `billing`, `encounters`, `providers`, `specialties`.
+- Number of joins: 3.
+- Join path: `billing → encounters → providers → specialties`.
+- Aggregations: Calculates total revenue using `SUM(b.allowed_amount)` and counts distinct billing claims.
+- Grouping: Claim year, claim month, specialty ID, and specialty name.
+- Indexes used: The execution plan shows primary-key lookups on `encounters`, `providers`, and `specialties`. The `billing` table is scanned.
+
+Performance:
+
+- Execution time: Approximately 0.247 milliseconds (0.000247 seconds).
+- Actual result rows: 2.
+- Estimated rows: The plan estimated approximately 2 rows for the `billing` table scan and approximately 2 rows entering the join stages. These are optimizer estimates, not counts of all rows scanned.
+- Execution method: MySQL `EXPLAIN ANALYZE`.
+
+Bottleneck Identified:
+
+The query joins four normalized tables and aggregates billing amounts by claim month and specialty. MySQL scans the billing table, performs primary-key lookups for related encounters, providers, and specialties, and then sorts and groups the results. These operations are inexpensive with the current small sample dataset, as the measured execution time was approximately 0.247 milliseconds. However, as billing records increase, table scans, joins, sorting, and aggregation may require more processing time and memory.
+
+Optimization Opportunity:
+
+A star schema can simplify analytical queries by organizing billing measures in a central fact table and connecting date and specialty attributes through dimensions. Appropriate indexes and pre-aggregated revenue measures may reduce query work, depending on the final schema and data volume. The performance improvement must be verified by running the equivalent query against the star schema and comparing execution times and execution plans.

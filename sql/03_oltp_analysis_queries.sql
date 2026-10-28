@@ -85,3 +85,29 @@ WHERE e.encounter_type = 'Inpatient'
     AND e.discharge_date IS NOT NULL
 GROUP BY s.specialty_id, s.specialty_name
 ORDER BY readmission_rate_percentage DESC;
+
+
+-- QUESTION 4: Revenue by Specialty and Month
+
+SELECT
+    YEAR(b.claim_date) AS claim_year,
+    MONTH(b.claim_date) AS claim_month,
+    s.specialty_name,
+    SUM(b.allowed_amount) AS total_revenue,
+    COUNT(DISTINCT b.billing_id) AS total_claims
+FROM billing AS b
+JOIN encounters AS e
+    ON b.encounter_id = e.encounter_id
+JOIN providers AS p
+    ON e.provider_id = p.provider_id
+JOIN specialties AS s
+    ON p.specialty_id = s.specialty_id
+GROUP BY
+    YEAR(b.claim_date),
+    MONTH(b.claim_date),
+    s.specialty_id,
+    s.specialty_name
+ORDER BY
+    claim_year,
+    claim_month,
+    s.specialty_name;
