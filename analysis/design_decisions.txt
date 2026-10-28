@@ -1,0 +1,154 @@
+HEALTHCARE ANALYTICS: OLTP TO STAR SCHEMA
+
+PART 3.1: DESIGN DECISIONS
+
+Decision 1: Fact Table Grain
+
+Choice: Option A — One row per encounter.
+
+The grain of `fact_encounters` will be one row per healthcare encounter. Each row represents a single patient encounter and stores foreign keys to the relevant dimensions, together with measurable encounter attributes.
+
+This grain is appropriate for the four analytical queries because:
+
+- Query 1: Monthly encounters can be counted by date, specialty, and encounter type.
+- Query 2: Diagnosis–procedure combinations can be analyzed through bridge tables connected to encounters.
+- Query 3: Readmissions can be identified by comparing encounters for the same patient and checking the discharge and subsequent encounter dates.
+- Query 4: Revenue can be analyzed using billing information associated with encounters.
+
+A separate `fact_billing` table will also be considered for revenue analysis. Its grain will be one row per billing record. This preserves the claim date and individual billing amounts if an encounter has multiple claims, preventing revenue from being assigned incorrectly to a single encounter date.
+
+Decision 2: Dimension Tables
+
+1. Date Dimension — `dim_date`
+
+Purpose: Provides calendar attributes for grouping and filtering analytical data.
+
+Attributes:
+- `date_key` — surrogate primary key, formatted as YYYYMMDD.
+- `calendar_date` — actual calendar date.
+- `day`
+- `day_of_week`
+- `day_name`
+- `month`
+- `month_name`
+- `quarter`
+- `year`
+
+The date dimension will support encounter-date, discharge-date, and claim-date analysis through separate foreign-key roles where appropriate.
+
+2. Patient Dimension — `dim_patient`
+
+Purpose: Provides descriptive information about patients.
+
+Attributes:
+- `patient_key` — surrogate primary key.
+- `patient_id` — original OLTP patient identifier.
+- `first_name`
+- `last_name`
+- `gender`
+- `date_of_birth`
+- `age_group`
+
+The age group can support patient segmentation without repeatedly calculating age in analytical queries. If it is stored, its calculation and update rules must be documented.
+
+3. Provider Dimension — `dim_provider`
+
+Purpose: Provides descriptive information about healthcare providers.
+
+Attributes:
+- `provider_key` — surrogate primary key.
+- `provider_id` — original OLTP provider identifier.
+- `provider_name`
+- `credential`
+- `specialty_key` — reference to `dim_specialty`.
+- `department_key` — reference to `dim_department`.
+
+4. Specialty Dimension — `dim_specialty`
+
+Purpose: Supports reporting and comparison by medical specialty.
+
+Attributes:
+- `specialty_key` — surrogate primary key.
+- `specialty_id` — original OLTP specialty identifier.
+- `specialty_name`
+- `specialty_code`
+
+5. Department Dimension — `dim_department`
+
+Purpose: Supports analysis by hospital department.
+
+Attributes:
+- `department_key` — surrogate primary key.
+- `department_id` — original OLTP department identifier.
+- `department_name`
+- `floor`
+- `capacity`
+
+6. Encounter Type Dimension — `dim_encounter_type`
+
+Purpose: Groups encounters by their type.
+
+Attributes:
+- `encounter_type_key` — surrogate primary key.
+- `type_name`
+
+Examples include Inpatient, Outpatient, and ER, based on the source data.
+
+7. Diagnosis Dimension — `dim_diagnosis`
+
+Purpose: Provides descriptive information for diagnosis analysis.
+
+Attributes:
+- `diagnosis_key` — surrogate primary key.
+- `diagnosis_id` — original OLTP diagnosis identifier.
+- `icd10_code`
+- `icd10_description`
+
+8. Procedure Dimension — `dim_procedure`
+
+Purpose: Provides descriptive information for procedure analysis.
+
+Attributes:
+- `procedure_key` — surrogate primary key.
+- `procedure_id` — original OLTP procedure identifier.
+- `cpt_code`
+- `cpt_description`
+
+Decision 3: Pre-Aggregated Metrics
+
+The `fact_encounters` table will contain the following measures:
+
+- `diagnosis_count` — number of diagnoses associated with the encounter.
+- `procedure_count` — number of procedures associated with the encounter.
+- `total_claim_amount` — sum of claim amounts associated with the encounter.
+- `total_allowed` — sum of allowed billing amounts associated with the encounter.
+
+These measures can reduce repeated aggregation work for common analytical reports.
+
+Diagnosis and procedure counts will be calculated from their respective OLTP relationship tables during ETL. Billing amounts will be aggregated from `billing` at the encounter level for `fact_encounters`.
+
+The separate `fact_billing` table will preserve individual billing records and their claim dates for accurate revenue-by-month analysis. This avoids losing billing-level detail when an encounter has multiple claims.
+
+Readmission rate will be calculated from encounter dates and discharge dates rather than stored as a fixed encounter-level measure, because readmission depends on subsequent encounters.
+
+Decision 4: Bridge Tables
+
+Two bridge tables will be created:
+
+1. `bridge_encounter_diagnoses`
+   - Connects encounters to their associated diagnoses.
+   - Stores the encounter key and diagnosis key.
+   - Can preserve diagnosis sequence where required.
+
+2. `bridge_encounter_procedures`
+   - Connects encounters to their associated procedures.
+   - Stores the encounter key and procedure key.
+   - Can preserve procedure date where required.
+
+Bridge tables are necessary because one encounter can have multiple diagnoses and multiple procedures, and each diagnosis or procedure can be associated with many encounters.
+
+Keeping these relationships in bridge tables avoids duplicating the encounter fact row for every diagnosis–procedure combination. It also supports Question 2 without losing the original many-to-many relationships.
+
+Conclusion
+
+The proposed model uses a central encounter fact table with descriptive dimensions, bridge tables for diagnoses and procedures, and a billing fact table for claim-level revenue analysis. This design supports the four analytical questions while maintaining the detail needed for correct counts, readmission analysis, and revenue reporting.
