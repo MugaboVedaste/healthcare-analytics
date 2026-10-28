@@ -56,3 +56,32 @@ ORDER BY
     d.icd10_code,
     pr.cpt_code;
 
+-- QUESTION 3: 30-Day Readmission Rate
+
+SELECT
+    s.specialty_name,
+    COUNT(DISTINCT e.encounter_id) AS total_inpatient_discharges,
+    COUNT(DISTINCT CASE
+        WHEN r.encounter_id IS NOT NULL THEN e.encounter_id
+    END) AS readmitted_encounters,
+    ROUND(
+        100.0 * COUNT(DISTINCT CASE
+            WHEN r.encounter_id IS NOT NULL THEN e.encounter_id
+        END) / NULLIF(COUNT(DISTINCT e.encounter_id), 0),
+        2
+    ) AS readmission_rate_percentage
+FROM encounters AS e
+JOIN providers AS p
+    ON e.provider_id = p.provider_id
+JOIN specialties AS s
+    ON p.specialty_id = s.specialty_id
+LEFT JOIN encounters AS r
+    ON r.patient_id = e.patient_id
+    AND r.encounter_date > e.discharge_date
+    AND r.encounter_date <= DATE_ADD(
+        e.discharge_date, INTERVAL 30 DAY
+    )
+WHERE e.encounter_type = 'Inpatient'
+    AND e.discharge_date IS NOT NULL
+GROUP BY s.specialty_id, s.specialty_name
+ORDER BY readmission_rate_percentage DESC;
