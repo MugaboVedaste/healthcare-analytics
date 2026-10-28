@@ -107,3 +107,64 @@ The query joins five normalized tables and processes diagnosis and procedure rel
 Optimization Opportunity:
 
 A star schema can simplify analytical queries by organizing encounter-related measures in a central fact table and connecting diagnosis, procedure, and other descriptive attributes through dimensions. Appropriate indexes and a suitable fact-table design may reduce join complexity and query work. The actual performance improvement must be verified by comparing this query with its equivalent star schema query using `EXPLAIN ANALYZE`.
+
+
+QUESTION 3: 30-Day Readmission Rate
+
+SQL Query:
+
+```sql
+SELECT
+    s.specialty_name,
+    COUNT(DISTINCT e.encounter_id) AS total_inpatient_discharges,
+    COUNT(DISTINCT CASE
+        WHEN r.encounter_id IS NOT NULL THEN e.encounter_id
+    END) AS readmitted_encounters,
+    ROUND(
+        100.0 * COUNT(DISTINCT CASE
+            WHEN r.encounter_id IS NOT NULL THEN e.encounter_id
+        END) / NULLIF(COUNT(DISTINCT e.encounter_id), 0),
+        2
+    ) AS readmission_rate_percentage
+FROM encounters AS e
+JOIN providers AS p
+    ON e.provider_id = p.provider_id
+JOIN specialties AS s
+    ON p.specialty_id = s.specialty_id
+LEFT JOIN encounters AS r
+    ON r.patient_id = e.patient_id
+    AND r.encounter_date > e.discharge_date
+    AND r.encounter_date <= DATE_ADD(
+        e.discharge_date, INTERVAL 30 DAY
+    )
+WHERE e.encounter_type = 'Inpatient'
+    AND e.discharge_date IS NOT NULL
+GROUP BY s.specialty_id, s.specialty_name
+ORDER BY readmission_rate_percentage DESC;
+```
+
+Schema Analysis:
+
+- Tables joined: `encounters` (twice), `providers`, `specialties`.
+- Number of joins: 3, including a self-join on `encounters`.
+- Join path: `encounters → providers → specialties`, with a self-join matching subsequent encounters for the same patient.
+- Aggregations: Counts eligible inpatient discharges and distinct encounters followed by a readmission, then calculates the readmission rate as a percentage.
+- Grouping: Specialty ID and specialty name.
+- Indexes used: The execution plan shows primary-key lookups on `providers` and `specialties`, and an index range scan on the second `encounters` reference to find potential readmissions.
+- Readmission detection: A subsequent encounter must belong to the same patient, occur after the original discharge, and take place within 30 days of discharge.
+
+Performance:
+
+- Execution time: Approximately 0.682 milliseconds (0.000682 seconds).
+- Actual result rows: 1 specialty group.
+- Estimated rows: The plan estimated 4 rows for the original `encounters` table scan, 1 row after filtering eligible inpatient discharges, and approximately 4 rows for the readmission index range scan. These are optimizer estimates, not counts of all rows scanned.
+- Actual rows processed: The original `encounters` table scan examined 4 rows, and the readmission index range scan examined 4 rows but found no matching readmission for the eligible encounter.
+- Execution method: MySQL `EXPLAIN ANALYZE`.
+
+Bottleneck Identified:
+
+The query uses a self-join on `encounters` to identify subsequent encounters for the same patient within 30 days of discharge. MySQL scans the original encounters, filters eligible inpatient discharges, and performs an index range scan to find potential readmissions. The query then groups the results, calculates distinct counts, and sorts the readmission rates. These operations may become expensive as the number of encounters increases, particularly if many records must be examined for each eligible discharge. With the current small sample dataset, the measured execution time is approximately 0.682 milliseconds, so this does not demonstrate a significant performance problem.
+
+Optimization Opportunity:
+
+A composite index on `(patient_id, encounter_date)` may improve the search for subsequent encounters belonging to the same patient within the 30-day window. Its effectiveness should be verified using `EXPLAIN ANALYZE`. A star schema may also support analytical reporting by organizing encounter information in a central fact table with relevant dimensions. Any performance improvement must be measured against the original OLTP query.
