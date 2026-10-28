@@ -1,0 +1,58 @@
+# Star Schema Query Performance Analysis
+
+## Question 1: Monthly Encounters by Specialty
+
+### SQL Query
+
+```sql
+USE healthcare_analytics_dw;
+
+EXPLAIN ANALYZE
+SELECT
+    d.year_number AS encounter_year,
+    d.month_number AS encounter_month,
+    s.specialty_name,
+    et.encounter_type_name,
+    COUNT(DISTINCT fe.encounter_id) AS total_encounters,
+    COUNT(DISTINCT fe.patient_key) AS unique_patients
+FROM fact_encounters AS fe
+JOIN dim_date AS d
+    ON fe.encounter_date_key = d.date_key
+JOIN dim_specialty AS s
+    ON fe.specialty_key = s.specialty_key
+JOIN dim_encounter_type AS et
+    ON fe.encounter_type_key = et.encounter_type_key
+GROUP BY
+    d.year_number,
+    d.month_number,
+    s.specialty_key,
+    s.specialty_name,
+    et.encounter_type_key,
+    et.encounter_type_name
+ORDER BY
+    encounter_year,
+    encounter_month,
+    s.specialty_name,
+    et.encounter_type_name;
+```
+
+### Schema Analysis
+
+- **Tables involved:** fact_encounters, dim_date, dim_specialty, dim_encounter_type.
+- **Number of joins:** 3.
+- **Result rows:** 4.
+- **Purpose:** Count encounters and unique patients by year, month, specialty, and encounter type.
+
+### Performance Comparison
+
+- **OLTP execution time:** 0.123 ms.
+- **Star schema execution time:** 0.175 ms.
+- **Relative performance:** The star schema query was approximately 1.42 times slower on this sample dataset.
+
+### Explanation
+
+The star schema stores the specialty key and encounter type key directly in the fact table. This allows the query to retrieve those attributes without joining the OLTP providers table. The date dimension provides calendar attributes for grouping encounters by year and month.
+
+The execution plan uses an index lookup on `fact_encounters` through `idx_fact_enc_specialty_date`, followed by primary-key lookups in the encounter type and date dimensions. The query returns the same four result rows as the OLTP version.
+
+Although the star schema supports analytical reporting through a fact table and descriptive dimensions, it did not run faster in this test. The dataset contains only four encounters, so the measured difference should not be treated as evidence that the star schema is generally slower. Performance should be tested again with a larger dataset.
