@@ -50,3 +50,60 @@ The query combines three normalized tables and performs joins before grouping th
 Optimization Opportunity:
 
 A star schema can simplify analytical queries by organizing encounter measures in a central fact table and exposing specialty, date, patient, and encounter-type attributes through dimensions. Appropriate indexes and pre-aggregated measures may reduce query work, depending on the final schema and data volume.
+
+
+QUESTION 2: Top Diagnosis–Procedure Pairs
+
+SQL Query:
+
+```sql
+SELECT
+    d.icd10_code,
+    d.icd10_description,
+    pr.cpt_code,
+    pr.cpt_description,
+    COUNT(DISTINCT e.encounter_id) AS encounter_count
+FROM encounters AS e
+JOIN encounter_diagnoses AS ed
+    ON e.encounter_id = ed.encounter_id
+JOIN diagnoses AS d
+    ON ed.diagnosis_id = d.diagnosis_id
+JOIN encounter_procedures AS ep
+    ON e.encounter_id = ep.encounter_id
+JOIN procedures AS pr
+    ON ep.procedure_id = pr.procedure_id
+GROUP BY
+    d.icd10_code,
+    d.icd10_description,
+    pr.cpt_code,
+    pr.cpt_description
+ORDER BY
+    encounter_count DESC,
+    d.icd10_code,
+    pr.cpt_code;
+```
+
+Schema Analysis:
+
+- Tables joined: `encounters`, `encounter_diagnoses`, `diagnoses`, `encounter_procedures`, `procedures`.
+- Number of joins: 4.
+- Join paths: `encounters → encounter_diagnoses → diagnoses` and `encounters → encounter_procedures → procedures`.
+- Aggregations: Counts distinct encounters for each diagnosis–procedure pair.
+- Grouping: Diagnosis code, diagnosis description, procedure code, and procedure description.
+- Indexes used: The execution plan shows an index lookup on `encounter_diagnoses.diagnosis_id`, primary-key lookups on `encounters` and `procedures`, and an index lookup on `encounter_procedures.encounter_id`. The `diagnoses` table is scanned.
+
+Performance:
+
+- Execution time: Approximately 0.228 milliseconds (0.000228 seconds).
+- Actual result rows: 5.
+- Intermediate rows: 7 rows entered the grouping stage.
+- Estimated rows: The plan estimated approximately 3 rows for the `diagnoses` table scan and approximately 3 rows for the nested-loop join stages. These are optimizer estimates, not counts of all rows scanned.
+- Execution method: MySQL `EXPLAIN ANALYZE`.
+
+Bottleneck Identified:
+
+The query joins five normalized tables and processes diagnosis and procedure relationships before grouping the results. An encounter with multiple diagnoses and procedures can produce multiple intermediate rows. MySQL then sorts the data, calculates distinct encounter counts, and sorts the final results. These operations are inexpensive with the current small sample dataset, as the measured execution time was approximately 0.228 milliseconds. However, as the data volume grows, joins, intermediate rows, sorting, grouping, and distinct-count calculations may require more processing time and memory.
+
+Optimization Opportunity:
+
+A star schema can simplify analytical queries by organizing encounter-related measures in a central fact table and connecting diagnosis, procedure, and other descriptive attributes through dimensions. Appropriate indexes and a suitable fact-table design may reduce join complexity and query work. The actual performance improvement must be verified by comparing this query with its equivalent star schema query using `EXPLAIN ANALYZE`.

@@ -27,3 +27,32 @@ ORDER BY
     encounter_month,
     s.specialty_name,
     e.encounter_type;
+    
+
+
+-- Query 2: Top Diagnosis-Procedure Pairs
+SELECT
+    d.icd10_code,
+    d.icd10_description,
+    pr.cpt_code,
+    pr.cpt_description,
+    COUNT(DISTINCT e.encounter_id) AS encounter_count
+FROM encounters AS e
+JOIN encounter_diagnoses AS ed
+    ON e.encounter_id = ed.encounter_id
+JOIN diagnoses AS d
+    ON ed.diagnosis_id = d.diagnosis_id
+JOIN encounter_procedures AS ep
+    ON e.encounter_id = ep.encounter_id
+JOIN procedures AS pr
+    ON ep.procedure_id = pr.procedure_id
+GROUP BY
+    d.icd10_code,
+    d.icd10_description,
+    pr.cpt_code,
+    pr.cpt_description
+ORDER BY
+    encounter_count DESC,
+    d.icd10_code,
+    pr.cpt_code;
+
