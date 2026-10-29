@@ -1,13 +1,10 @@
-# Star Schema Query Performance Analysis
+# Star Schema Queries
 
 ## Question 1: Monthly Encounters by Specialty
 
-### SQL Query
+### The SQL (optimized for star schema)
 
 ```sql
-USE healthcare_analytics_dw;
-
-EXPLAIN ANALYZE
 SELECT
     d.year_number AS encounter_year,
     d.month_number AS encounter_month,
@@ -36,23 +33,70 @@ ORDER BY
     et.encounter_type_name;
 ```
 
-### Schema Analysis
+### 1. Execution time estimate
 
-- **Tables involved:** fact_encounters, dim_date, dim_specialty, dim_encounter_type.
-- **Number of joins:** 3.
-- **Result rows:** 4.
-- **Purpose:** Count encounters and unique patients by year, month, specialty, and encounter type.
+- Star schema: ~0.175 ms
+- Original OLTP schema: ~0.123 ms
 
-### Performance Comparison
+### 2. Improvement factor
 
-- **OLTP execution time:** 0.123 ms.
-- **Star schema execution time:** 0.175 ms.
-- **Relative performance:** The star schema query was approximately 1.42 times slower on this sample dataset.
+The star schema was approximately **1.42× slower** on this sample dataset.
 
-### Explanation
+Calculation: 0.175 / 0.123 ≈ 1.42.
 
-The star schema stores the specialty key and encounter type key directly in the fact table. This allows the query to retrieve those attributes without joining the OLTP providers table. The date dimension provides calendar attributes for grouping encounters by year and month.
+### 3. Explanation
 
-The execution plan uses an index lookup on `fact_encounters` through `idx_fact_enc_specialty_date`, followed by primary-key lookups in the encounter type and date dimensions. The query returns the same four result rows as the OLTP version.
+The fact table stores the specialty, patient, encounter type, and date keys needed for analysis. This avoids joining the OLTP providers table to retrieve the specialty. The date dimension provides year and month attributes for grouping.
 
-Although the star schema supports analytical reporting through a fact table and descriptive dimensions, it did not run faster in this test. The dataset contains only four encounters, so the measured difference should not be treated as evidence that the star schema is generally slower. Performance should be tested again with a larger dataset.
+However, the star schema was not faster in this test. With only four encounters, the overhead of grouping, sorting, and accessing dimension tables can outweigh the benefits of dimensional modeling.
+
+---
+
+## Question 2: Top Diagnosis–Procedure Pairs
+
+### The SQL (optimized for star schema)
+
+```sql
+SELECT
+    d.icd10_code,
+    d.icd10_description,
+    p.cpt_code,
+    p.cpt_description,
+    COUNT(*) AS pair_count
+FROM bridge_encounter_diagnoses AS ed
+JOIN dim_diagnosis AS d
+    ON ed.diagnosis_key = d.diagnosis_key
+JOIN bridge_encounter_procedures AS ep
+    ON ed.encounter_key = ep.encounter_key
+JOIN dim_procedure AS p
+    ON ep.procedure_key = p.procedure_key
+GROUP BY
+    d.diagnosis_key,
+    d.icd10_code,
+    d.icd10_description,
+    p.procedure_key,
+    p.cpt_code,
+    p.cpt_description
+ORDER BY
+    pair_count DESC,
+    d.icd10_code,
+    p.cpt_code
+LIMIT 5;
+```
+
+### 1. Execution time estimate
+
+- Star schema: ~0.957 ms
+- Original OLTP schema: ~0.228 ms
+
+### 2. Improvement factor
+
+The star schema was approximately **4.20× slower** on this sample dataset.
+
+Calculation: 0.957 / 0.228 ≈ 4.20.
+
+### 3. Explanation
+
+The bridge tables connect diagnoses and procedures through their shared encounter key. The dimension tables provide diagnosis and procedure descriptions.
+
+MySQL uses index lookups to retrieve the related records, but it also creates a temporary table for aggregation and sorts the results to return the top five pairs. These operations add overhead. The star schema does not eliminate the joins needed to connect diagnoses and procedures, and the small dataset offers little opportunity for dimensional modeling to improve performance.

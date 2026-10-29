@@ -1,7 +1,7 @@
 
 USE healthcare_analytics_dw;
 
-EXPLAIN ANALYZE
+
 SELECT
     d.year_number AS encounter_year,
     d.month_number AS encounter_month,
@@ -28,3 +28,32 @@ ORDER BY
     encounter_month,
     s.specialty_name,
     et.encounter_type_name;
+    
+USE healthcare_analytics_dw;
+
+
+SELECT
+    d.icd10_code,
+    d.icd10_description,
+    p.cpt_code,
+    p.cpt_description,
+    COUNT(*) AS pair_count
+FROM bridge_encounter_diagnoses AS ed
+JOIN dim_diagnosis AS d
+    ON ed.diagnosis_key = d.diagnosis_key
+JOIN bridge_encounter_procedures AS ep
+    ON ed.encounter_key = ep.encounter_key
+JOIN dim_procedure AS p
+    ON ep.procedure_key = p.procedure_key
+GROUP BY
+    d.diagnosis_key,
+    d.icd10_code,
+    d.icd10_description,
+    p.procedure_key,
+    p.cpt_code,
+    p.cpt_description
+ORDER BY
+    pair_count DESC,
+    d.icd10_code,
+    p.cpt_code
+LIMIT 5;
