@@ -1,4 +1,3 @@
-
 -- ============================================================
 -- Healthcare Analytics: Star Schema
 -- Source: OLTP healthcare database
@@ -169,26 +168,29 @@ CREATE TABLE IF NOT EXISTS bridge_encounter_diagnoses (
 );
 
 -- 11. Bridge: procedures associated with encounters
-CREATE TABLE IF NOT EXISTS bridge_encounter_procedures (
+CREATE TABLE bridge_encounter_procedures (
+    encounter_procedure_id INT NOT NULL,
     encounter_key BIGINT NOT NULL,
     procedure_key INT NOT NULL,
-    procedure_date_key INT NULL,
+    procedure_date_key INT DEFAULT NULL,
 
-    PRIMARY KEY (encounter_key, procedure_key),
+    PRIMARY KEY (encounter_procedure_id),
+
+    KEY idx_bridge_proc_encounter (encounter_key),
+    KEY idx_bridge_proc_procedure (procedure_key),
+    KEY idx_bridge_proc_date (procedure_date_key),
 
     CONSTRAINT fk_bridge_proc_encounter
         FOREIGN KEY (encounter_key)
-        REFERENCES fact_encounters(encounter_key),
+        REFERENCES fact_encounters (encounter_key),
 
     CONSTRAINT fk_bridge_proc_procedure
         FOREIGN KEY (procedure_key)
-        REFERENCES dim_procedure(procedure_key),
+        REFERENCES dim_procedure (procedure_key),
 
     CONSTRAINT fk_bridge_proc_date
         FOREIGN KEY (procedure_date_key)
-        REFERENCES dim_date(date_key),
-
-    INDEX idx_bridge_proc_procedure (procedure_key)
+        REFERENCES dim_date (date_key)
 );
 
 -- 12. Billing fact

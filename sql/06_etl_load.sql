@@ -191,21 +191,31 @@ JOIN dim_diagnosis dgn
     ON dgn.diagnosis_id = ed.diagnosis_id;
 
 
--- STEP 5: Load encounter-procedure bridge.
-
-INSERT IGNORE INTO bridge_encounter_procedures (
-    encounter_key, procedure_key, procedure_date_key
+-- STEP 5: Load encounter-procedure bridge
+INSERT INTO bridge_encounter_procedures (
+    encounter_procedure_id,
+    encounter_key,
+    procedure_key,
+    procedure_date_key
 )
 SELECT
+    ep.encounter_procedure_id,
     fe.encounter_key,
     pr.procedure_key,
-    CAST(DATE_FORMAT(ep.procedure_date, '%Y%m%d') AS UNSIGNED)
+    CASE
+        WHEN ep.procedure_date IS NOT NULL
+        THEN CAST(DATE_FORMAT(ep.procedure_date, '%Y%m%d') AS UNSIGNED)
+        ELSE NULL
+    END
 FROM healthcare_analytics.encounter_procedures ep
 JOIN fact_encounters fe
     ON fe.encounter_id = ep.encounter_id
 JOIN dim_procedure pr
-    ON pr.procedure_id = ep.procedure_id;
-
+    ON pr.procedure_id = ep.procedure_id
+ON DUPLICATE KEY UPDATE
+    encounter_key = VALUES(encounter_key),
+    procedure_key = VALUES(procedure_key),
+    procedure_date_key = VALUES(procedure_date_key);
 
 -- STEP 6: Load billing fact.
 

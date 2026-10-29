@@ -1,0 +1,293 @@
+# ETL Design — Healthcare Analytics Data Warehouse
+
+## 1. Dimension Load Logic
+
+### 1.1 Loading `dim_patient`
+
+**Source:** `healthcare_analytics.patients`
+
+**Target:** `healthcare_analytics_dw.dim_patient`
+
+**Approach:**
+
+1. Extract patient records from the source `patients` table.
+2. Match each source patient using `patient_id`.
+3. Insert new patients into `dim_patient`.
+4. Generate a warehouse surrogate key, `patient_key`, for each new patient.
+5. Update existing patient attributes when first name, last name, date of birth, gender, or MRN changes.
+6. Use `patient_key` in fact tables instead of the source `patient_id`.
+
+**Pseudocode:**
+
+```text
+FOR each patient in patients:
+    FIND dim_patient record using patient_id
+
+    IF patient does not exist:
+        INSERT patient into dim_patient
+    ELSE:
+        UPDATE patient attributes
+    END IF
+END FOR
+```
+
+The current implementation uses `ON DUPLICATE KEY UPDATE`. Updates overwrite existing attributes, following a Type 1 Slowly Changing Dimension (SCD) approach. Historical versions of patient attributes are not preserved.
+
+### 1.2 Loading `dim_date`
+
+**Source:** Dates extracted from encounters, discharges, procedures, and billing records.
+
+**Target:** `healthcare_analytics_dw.dim_date`
+
+**Approach:**
+
+1. Extract distinct encounter dates, discharge dates, procedure dates, and billing claim dates.
+2. Generate `date_key` using the `YYYYMMDD` format.
+3. Populate the calendar attributes supported by the current schema.
+4. Insert each date only once.
+5. Allow additional dates to be inserted during subsequent ETL runs.
+
+**Pseudocode:**
+
+```text
+COLLECT distinct dates from source tables
+
+FOR each collected date:
+    GENERATE date_key in YYYYMMDD format
+    INSERT date and calendar attributes
+    IGNORE the record if date_key already exists
+END FOR
+```
+
+The current implementation uses `INSERT IGNORE` and loads dates found in the source data. It does not generate every date in a continuous calendar range.
+
+### 1.3 Loading Other Dimensions
+
+Load the remaining dimensions from their corresponding source tables:
+
+- `dim_specialty` from `specialties`
+- `dim_department` from `departments`
+- `dim_provider` from `providers`
+- `dim_encounter_type` from distinct encounter types in `encounters`
+- `dim_diagnosis` from `diagnoses`
+- `dim_procedure` from `procedures`
+
+**Approach:**
+
+1. Extract records from the corresponding source tables.
+2. Match existing dimension members using their source identifiers or natural keys.
+3. Insert new dimension records.
+4. Update descriptive attributes using upsert logic where implemented.
+5. Preserve the warehouse surrogate keys used by fact and bridge tables.
+
+## 2. Fact Table Load Logic
+
+### 2.1 Loading `fact_encounters`
+
+**Source:** `encounters` and related patient, provider, specialty, department, and encounter-type information.
+
+**Target:** `healthcare_analytics_dw.fact_encounters`
+
+**Grain:** One row per source encounter.
+
+**Approach:**
+
+1. Extract encounter records from the source `encounters` table.
+2. Look up the corresponding `patient_key`, `provider_key`, `specialty_key`, `department_key`, and `encounter_type_key`.
+3. Look up `encounter_date_key` using the encounter date.
+4. Look up `discharge_date_key` when a discharge date is available.
+5. Preserve the original encounter and discharge timestamps in the `DATETIME` columns.
+6. Calculate diagnosis and procedure counts independently.
+7. Insert new encounter records or update existing records using the source `encounter_id`.
+
+**Pseudocode:**
+
+```text
+FOR each encounter in encounters:
+    LOOK UP patient_key
+    LOOK UP provider_key
+    LOOK UP specialty_key
+    LOOK UP department_key
+    LOOK UP encounter_type_key
+    LOOK UP encounter_date_key
+
+    IF discharge date exists:
+        LOOK UP discharge_date_key
+    ELSE:
+        SET discharge_date_key to NULL
+    END IF
+
+    COUNT diagnosis associations
+    COUNT procedure associations
+
+    IF all required dimension records are found:
+        INSERT or UPDATE fact_encounters
+    ELSE:
+        ENCOUNTER may be excluded by the current inner joins
+    END IF
+END FOR
+```
+
+The current ETL uses inner joins for required dimension lookups. Therefore, encounters without matching required dimension records may be excluded from the fact table load.
+
+### 2.2 Pre-Aggregated Metrics
+
+The encounter fact table stores the following pre-aggregated metrics:
+
+- `diagnosis_count`: Number of diagnoses associated with an encounter.
+- `procedure_count`: Number of procedures associated with an encounter.
+
+Calculate these metrics independently using their respective source association tables. This prevents diagnosis and procedure rows from multiplying each other and producing incorrect counts.
+
+Billing measures are loaded separately into `fact_billing` because billing records have a different grain.
+
+### 2.3 Handling Missing Data
+
+The current ETL handles missing data as follows:
+
+- **Missing discharge date:** The discharge date key and timestamp remain `NULL` where permitted by the schema.
+- **Missing procedure date:** The procedure date key remains `NULL` where permitted.
+- **Missing required dimension record:** The affected encounter may be excluded by the current inner joins.
+- **Missing optional attributes:** Preserve `NULL` values where supported rather than inventing data.
+- **Duplicate records:** Use source identifiers, unique constraints, and the relevant insert or upsert logic to prevent duplicate records.
+
+The current implementation does not create a dedicated rejected-record log or automatically retry records with missing required relationships.
+
+### 2.4 Loading `fact_billing`
+
+**Source:** `healthcare_analytics.billing`
+
+**Target:** `healthcare_analytics_dw.fact_billing`
+
+**Grain:** One row per source billing record.
+
+**Approach:**
+
+1. Extract billing records from the source `billing` table.
+2. Match each billing record to its associated encounter.
+3. Retrieve the corresponding warehouse `encounter_key`.
+4. Look up `claim_date_key` using the claim date.
+5. Load the available billing measures and claim status.
+6. Insert new records or update existing records using the source billing identifier.
+
+The current implementation uses upsert logic for billing records. Records that cannot satisfy the required relationships may be excluded by the relevant joins.
+
+## 3. Bridge Table Load Logic
+
+### 3.1 Loading `bridge_encounter_diagnoses`
+
+**Source:** `healthcare_analytics.encounter_diagnoses`
+
+**Target:** `healthcare_analytics_dw.bridge_encounter_diagnoses`
+
+**Approach:**
+
+1. Extract diagnosis associations from the source table.
+2. Find the corresponding `encounter_key` using the source encounter identifier.
+3. Find the corresponding `diagnosis_key` using the source diagnosis identifier.
+4. Load the encounter key, diagnosis key, and diagnosis sequence.
+5. Ignore duplicate records according to the current implementation.
+
+**Pseudocode:**
+
+```text
+FOR each row in encounter_diagnoses:
+    LOOK UP encounter_key
+    LOOK UP diagnosis_key
+
+    IF both keys are available:
+        INSERT diagnosis association
+        IGNORE duplicate records
+    END IF
+END FOR
+```
+
+The current implementation uses `INSERT IGNORE`. Existing diagnosis bridge records are not updated if their sequence changes.
+
+### 3.2 Loading `bridge_encounter_procedures`
+
+**Source:** `healthcare_analytics.encounter_procedures`
+
+**Target:** `healthcare_analytics_dw.bridge_encounter_procedures`
+
+**Approach:**
+
+1. Extract procedure associations from the source table.
+2. Find the corresponding `encounter_key`.
+3. Find the corresponding `procedure_key`.
+4. Look up `procedure_date_key` using the procedure date.
+5. Load the encounter–procedure association using the source `encounter_procedure_id`.
+6. Insert new records or update existing records using upsert logic.
+
+**Pseudocode:**
+
+```text
+FOR each row in encounter_procedures:
+    LOOK UP encounter_key
+    LOOK UP procedure_key
+    LOOK UP procedure_date_key
+
+    IF required relationships are available:
+        INSERT or UPDATE bridge association
+        using encounter_procedure_id
+    END IF
+END FOR
+```
+
+Using `encounter_procedure_id` allows the same procedure to be recorded multiple times for one encounter when the source contains different procedure occurrence identifiers.
+
+## 4. Refresh Strategy
+
+### 4.1 Current Loading Approach
+
+The current ETL performs a full-source scan with table-specific insert, update, and duplicate-ignore operations. It does not truncate and rebuild the entire warehouse on every run.
+
+A daily run is a reasonable proposed schedule for this project, depending on reporting requirements.
+
+Each run processes the source records and applies the loading logic to dimensions, facts, and bridge tables. However, the script does not currently implement change-based incremental extraction, and source deletions are not automatically propagated to the warehouse.
+
+### 4.2 Future Incremental Loading
+
+As the dataset grows, incremental loading could improve performance by processing only new or changed records.
+
+**Future approach:**
+
+1. Identify new or changed source records.
+2. Use a reliable change-tracking mechanism, such as an `updated_at` timestamp, Change Data Capture (CDC), or a maintained change log.
+3. Load or update only affected warehouse records.
+4. Track the last successfully processed batch or extraction watermark.
+5. Validate the results before advancing the watermark.
+
+Incremental loading is a future improvement, not part of the current ETL implementation. It would require reliable source change tracking before it could be implemented safely.
+
+### 4.3 Handling Late-Arriving Facts
+
+A late-arriving fact is a record that becomes available after its associated event or after an earlier ETL run. For example, a billing record may arrive after its encounter has already been loaded.
+
+**Current behavior:**
+
+- The ETL can load newly available records during a subsequent run if the required relationships are available.
+- Records with missing required dimension or fact relationships may be excluded by the current inner joins.
+- There is no dedicated late-arriving-fact queue or automatic retry process.
+
+**Potential future improvement:**
+
+1. Identify records that could not be loaded because required relationships were missing.
+2. Resolve or load the required dimension and fact records.
+3. Retry the unresolved records.
+4. Recalculate affected diagnosis or procedure counts if their source associations have changed.
+5. Validate the resulting warehouse records.
+
+## 5. Data Quality and Validation
+
+The following checks are recommended for validating the warehouse after ETL execution:
+
+- Compare source and target record counts where applicable.
+- Verify that fact and bridge keys reference valid warehouse records.
+- Check for duplicate source identifiers.
+- Compare diagnosis and procedure counts against source associations.
+- Reconcile billing totals between the source and warehouse.
+- Verify that encounter and discharge timestamps are preserved accurately.
+- Investigate records excluded because required relationships are missing.
+
+These are recommended validation checks; they should not be considered automatically implemented unless corresponding checks are present in the ETL script.
