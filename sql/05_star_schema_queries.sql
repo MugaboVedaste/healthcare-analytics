@@ -89,3 +89,27 @@ GROUP BY
 ORDER BY
     readmission_rate_percent DESC,
     s.specialty_name;
+
+
+
+SELECT
+    d.year_number AS claim_year,
+    d.month_number AS claim_month,
+    s.specialty_name,
+    SUM(b.allowed_amount) AS total_allowed_revenue
+FROM fact_billing AS b
+JOIN fact_encounters AS fe
+    ON b.encounter_key = fe.encounter_key
+JOIN dim_specialty AS s
+    ON fe.specialty_key = s.specialty_key
+JOIN dim_date AS d
+    ON b.claim_date_key = d.date_key
+GROUP BY
+    d.year_number,
+    d.month_number,
+    s.specialty_key,
+    s.specialty_name
+ORDER BY
+    claim_year,
+    claim_month,
+    total_allowed_revenue DESC;

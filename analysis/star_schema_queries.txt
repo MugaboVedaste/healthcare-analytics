@@ -152,3 +152,50 @@ Calculation: 0.682 / 0.322 ≈ 2.12.
 The fact table stores patient, specialty, and encounter type keys, allowing the query to retrieve the relevant data with fewer joins to normalized OLTP tables. The execution plan uses indexes to locate inpatient encounters and search for subsequent encounters by patient and datetime.
 
 The self-join on the fact table is still necessary to identify readmissions. In this small dataset, the indexed lookup helps reduce the time required for that search.
+
+## Question 4: Revenue by Specialty and Month
+
+### The SQL (optimized for star schema)
+
+```sql
+SELECT
+    d.year_number AS claim_year,
+    d.month_number AS claim_month,
+    s.specialty_name,
+    SUM(b.allowed_amount) AS total_allowed_revenue
+FROM fact_billing AS b
+JOIN fact_encounters AS fe
+    ON b.encounter_key = fe.encounter_key
+JOIN dim_specialty AS s
+    ON fe.specialty_key = s.specialty_key
+JOIN dim_date AS d
+    ON b.claim_date_key = d.date_key
+GROUP BY
+    d.year_number,
+    d.month_number,
+    s.specialty_key,
+    s.specialty_name
+ORDER BY
+    claim_year,
+    claim_month,
+    total_allowed_revenue DESC;
+```
+
+### 1. Execution time estimate
+
+- Star schema: ~0.275 ms
+- Original OLTP schema: ~0.247 ms
+
+### 2. Improvement factor
+
+The star schema was approximately **1.11× slower** in this test.
+
+Calculation: 0.275 / 0.247 ≈ 1.11.
+
+### 3. Explanation
+
+The billing fact table stores allowed amounts and a claim-date key. The encounter fact table connects billing records to specialties, while the date dimension provides year and month attributes.
+
+MySQL uses primary-key lookups to retrieve the related encounters, specialties, and dates. It then creates a temporary table to aggregate revenue and sorts the results.
+
+Although the star schema provides a clear structure for analytical reporting, it was slightly slower in this test. With only two billing records, the dataset is too small to demonstrate a meaningful performance benefit.
