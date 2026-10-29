@@ -100,3 +100,55 @@ Calculation: 0.957 / 0.228 ≈ 4.20.
 The bridge tables connect diagnoses and procedures through their shared encounter key. The dimension tables provide diagnosis and procedure descriptions.
 
 MySQL uses index lookups to retrieve the related records, but it also creates a temporary table for aggregation and sorts the results to return the top five pairs. These operations add overhead. The star schema does not eliminate the joins needed to connect diagnoses and procedures, and the small dataset offers little opportunity for dimensional modeling to improve performance.
+
+## Question 3: 30-Day Readmission Rate
+
+### The SQL (optimized for star schema)
+
+```sql
+SELECT
+    s.specialty_name,
+    COUNT(DISTINCT index_enc.encounter_id) AS inpatient_discharges,
+    COUNT(DISTINCT readmit.encounter_id) AS readmitted_encounters,
+    ROUND(
+        100.0 * COUNT(DISTINCT readmit.encounter_id)
+        / NULLIF(COUNT(DISTINCT index_enc.encounter_id), 0),
+        2
+    ) AS readmission_rate_percent
+FROM fact_encounters AS index_enc
+JOIN dim_specialty AS s
+    ON index_enc.specialty_key = s.specialty_key
+JOIN dim_encounter_type AS et
+    ON index_enc.encounter_type_key = et.encounter_type_key
+LEFT JOIN fact_encounters AS readmit
+    ON readmit.patient_key = index_enc.patient_key
+    AND readmit.encounter_datetime > index_enc.discharge_datetime
+    AND readmit.encounter_datetime <= DATE_ADD(
+        index_enc.discharge_datetime,
+        INTERVAL 30 DAY
+    )
+WHERE et.encounter_type_name = 'Inpatient'
+GROUP BY
+    s.specialty_key,
+    s.specialty_name
+ORDER BY
+    readmission_rate_percent DESC,
+    s.specialty_name;
+```
+
+### 1. Execution time estimate
+
+- Star schema: ~0.322 ms
+- Original OLTP schema: ~0.682 ms
+
+### 2. Improvement factor
+
+The star schema was approximately **2.12× faster** in this test.
+
+Calculation: 0.682 / 0.322 ≈ 2.12.
+
+### 3. Explanation
+
+The fact table stores patient, specialty, and encounter type keys, allowing the query to retrieve the relevant data with fewer joins to normalized OLTP tables. The execution plan uses indexes to locate inpatient encounters and search for subsequent encounters by patient and datetime.
+
+The self-join on the fact table is still necessary to identify readmissions. In this small dataset, the indexed lookup helps reduce the time required for that search.

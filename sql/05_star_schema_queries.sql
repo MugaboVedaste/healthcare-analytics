@@ -57,3 +57,35 @@ ORDER BY
     d.icd10_code,
     p.cpt_code
 LIMIT 5;
+
+
+USE healthcare_analytics_dw;
+
+SELECT
+    s.specialty_name,
+    COUNT(DISTINCT index_enc.encounter_id) AS inpatient_discharges,
+    COUNT(DISTINCT readmit.encounter_id) AS readmitted_encounters,
+    ROUND(
+        100.0 * COUNT(DISTINCT readmit.encounter_id)
+        / NULLIF(COUNT(DISTINCT index_enc.encounter_id), 0),
+        2
+    ) AS readmission_rate_percent
+FROM fact_encounters AS index_enc
+JOIN dim_specialty AS s
+    ON index_enc.specialty_key = s.specialty_key
+JOIN dim_encounter_type AS et
+    ON index_enc.encounter_type_key = et.encounter_type_key
+LEFT JOIN fact_encounters AS readmit
+    ON readmit.patient_key = index_enc.patient_key
+    AND readmit.encounter_datetime > index_enc.discharge_datetime
+    AND readmit.encounter_datetime <= DATE_ADD(
+        index_enc.discharge_datetime,
+        INTERVAL 30 DAY
+    )
+WHERE et.encounter_type_name = 'Inpatient'
+GROUP BY
+    s.specialty_key,
+    s.specialty_name
+ORDER BY
+    readmission_rate_percent DESC,
+    s.specialty_name;
