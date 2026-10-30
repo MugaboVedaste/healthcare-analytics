@@ -1,3 +1,39 @@
+QUERY ANALYSIS: NORMALIZED (OLTP) SCHEMA
+Database: healthcare_analytics (MySQL 8.0)
+
+Test Approach
+
+The queries were tested in two phases.
+
+Phase 1: Small dataset (sample data from the project brief)
+- Data volume:
+  - patients: 3
+  - encounters: 4
+  - encounter_diagnoses: 6
+  - encounter_procedures: 4
+  - billing: 2
+  - providers: 3, specialties: 3, diagnoses: 3, procedures: 3
+- Purpose: confirm that each query runs and returns correct results.
+- Measurement: MySQL EXPLAIN ANALYZE (server execution time in milliseconds).
+
+Phase 2: Large dataset (sample data plus 100,000 synthetic encounters, 2022-2026)
+- Data volume:
+  - patients: 10,003
+  - encounters: 100,004
+  - encounter_diagnoses: 200,006
+  - encounter_procedures: 100,004
+  - billing: 100,002
+  - providers: 3, specialties: 3, diagnoses: 3, procedures: 3
+- Purpose: measure performance at a realistic volume and identify bottlenecks.
+- Measurement:
+  - Execution time: MySQL Workbench duration, median of 4 runs. Workbench on Windows measures in steps of about 16 ms.
+  - Execution plans and row counts: MySQL EXPLAIN ANALYZE on the same data. Row counts are actual rows reported by the plan, not optimizer estimates.
+
+Why two phases: on the small dataset every query finished in under 1 millisecond, so no bottleneck was visible. The plans on 4 encounters are not representative either, because the optimizer chooses differently on tiny tables. The large dataset exposes the real costs.
+
+Note on query versions: during Phase 1, Q2 had no LIMIT, Q3 counted a return visit of any type, and Q4 grouped by claim month. These were then aligned with the star schema queries (LIMIT 20, inpatient-to-inpatient readmissions, service month), which are the versions shown below and measured in Phase 2. On the sample data the old and new versions return the same results.
+
+
 QUESTION 1: Monthly Encounters by Specialty
 
 SQL Query:
@@ -31,28 +67,41 @@ Schema Analysis:
 
 - Tables joined: `encounters`, `providers`, `specialties`.
 - Number of joins: 2.
-- Join path: `encounters → providers → specialties`.
-- Aggregations: Counts distinct encounters and distinct patients.
-- Grouping: Year, month, specialty, and encounter type.
-- Indexes used: The execution plan shows an index scan on `providers.specialty_id`, primary-key lookups on `specialties`, and index lookups on `encounters.provider_id`.
+- Join path: `encounters → providers → specialties`. Specialty is not stored on the encounter, so every encounter must be routed through its provider to find its specialty.
+- Aggregations: distinct encounters and distinct patients.
+- Grouping: year, month, specialty, encounter type.
+- Indexes used: covering index scan on `providers.specialty_id`, primary-key lookups on `specialties`, index lookups on `encounters.provider_id`.
 
 Performance:
 
-- Execution time: Approximately 0.123 milliseconds (0.000123 seconds).
-- Actual result rows: 4.
-- Estimated rows: The plan estimated approximately 3 rows for the provider scan and approximately 3 rows entering the first nested-loop join. These are estimates, not a count of all rows scanned.
-- Execution method: MySQL `EXPLAIN ANALYZE`.
+Phase 1: Small dataset (4 encounters)
+- Execution time: 0.123 milliseconds (0.000123 seconds).
+- Result rows: 4.
+- Rows scanned: 3 provider rows, 3 specialty lookups, 4 encounter rows.
+
+Phase 2: Large dataset (100,004 encounters)
+- Execution time: 0.40 seconds (runs: 0.406, 0.375, 0.390, 0.422).
+- Result rows: 171.
+- Rows scanned:
+  - 3 provider rows and 3 specialty lookups.
+  - 100,004 encounter rows, fetched through 3 index lookups on `provider_id` (33,335 rows each).
+  - 100,004 joined rows sorted before grouping.
+- Where the time goes (from EXPLAIN ANALYZE): about half in the joins, about half in sorting 100,004 rows and computing the two distinct counts.
+
+Comparison: encounters grew about 25,000 times (4 → 100,004) and execution time grew about 3,300 times (0.123 ms → 0.40 s). The query went from instant to noticeable, and its cost keeps growing with every encounter added.
 
 Bottleneck Identified:
 
-The query combines three normalized tables and performs joins before grouping the results. MySQL then sorts the grouped data and calculates distinct counts for encounters and patients. These operations are inexpensive with the current small sample dataset, as the measured execution time was approximately 0.123 milliseconds. However, as the number of encounters and patients increases, joins, sorting, grouping, and distinct-count calculations may require more processing time and memory.
+The grouping attribute (specialty) is two tables away from the rows being counted. MySQL starts from the 3 providers and, for each one, reads every one of its encounters through the `provider_id` index. Because that index does not contain `encounter_date`, `encounter_type` or `patient_id`, each of the 100,004 index entries also requires a lookup into the table row. All 100,004 joined rows are then sorted on year, month, specialty and type. The grouping uses `YEAR()` and `MONTH()` on a DATETIME, so `idx_encounter_date` cannot help with the grouping or the sort. Finally, `COUNT(DISTINCT patient_id)` must de-duplicate patients within each of the 171 groups. `COUNT(DISTINCT e.encounter_id)` adds unnecessary work: `encounter_id` is the primary key and already unique per row, so `COUNT(*)` gives the same answer.
+
+The cost grows directly with the number of encounters, because every encounter is joined, sorted and counted on every run.
 
 Optimization Opportunity:
 
-A star schema can simplify analytical queries by organizing encounter measures in a central fact table and exposing specialty, date, patient, and encounter-type attributes through dimensions. Appropriate indexes and pre-aggregated measures may reduce query work, depending on the final schema and data volume.
+Store `specialty_key` directly on each fact row, so the provider hop disappears. Use an integer date key (YYYYMMDD), whose month can be derived without date functions. A covering index on (date, specialty, encounter type, patient) then lets the query read only the index. Replace `COUNT(DISTINCT encounter_id)` with `COUNT(*)` at one-row-per-encounter grain.
 
 
-QUESTION 2: Top Diagnosis–Procedure Pairs
+QUESTION 2: Top Diagnosis-Procedure Pairs
 
 SQL Query:
 
@@ -80,7 +129,8 @@ GROUP BY
 ORDER BY
     encounter_count DESC,
     d.icd10_code,
-    pr.cpt_code;
+    pr.cpt_code
+LIMIT 20;
 ```
 
 Schema Analysis:
@@ -88,28 +138,44 @@ Schema Analysis:
 - Tables joined: `encounters`, `encounter_diagnoses`, `diagnoses`, `encounter_procedures`, `procedures`.
 - Number of joins: 4.
 - Join paths: `encounters → encounter_diagnoses → diagnoses` and `encounters → encounter_procedures → procedures`.
-- Aggregations: Counts distinct encounters for each diagnosis–procedure pair.
-- Grouping: Diagnosis code, diagnosis description, procedure code, and procedure description.
-- Indexes used: The execution plan shows an index lookup on `encounter_diagnoses.diagnosis_id`, primary-key lookups on `encounters` and `procedures`, and an index lookup on `encounter_procedures.encounter_id`. The `diagnoses` table is scanned.
+- How diagnosis and procedure data are combined: the two junction tables have no direct link. Each is joined to the same `encounter_id`, so every diagnosis of an encounter is paired with every procedure of that encounter. `COUNT(DISTINCT e.encounter_id)` is required so that an encounter is counted once per pair.
+- Indexes used: full table scan of `encounter_procedures`, hash join to `procedures`, primary-key lookups on `encounters`, index lookups on `encounter_diagnoses.encounter_id`, hash join to `diagnoses`.
 
 Performance:
 
-- Execution time: Approximately 0.228 milliseconds (0.000228 seconds).
-- Actual result rows: 5.
+Phase 1: Small dataset (4 encounters)
+- Execution time: 0.228 milliseconds (0.000228 seconds).
+- Result rows: 5.
 - Intermediate rows: 7 rows entered the grouping stage.
-- Estimated rows: The plan estimated approximately 3 rows for the `diagnoses` table scan and approximately 3 rows for the nested-loop join stages. These are optimizer estimates, not counts of all rows scanned.
-- Execution method: MySQL `EXPLAIN ANALYZE`.
+
+Phase 2: Large dataset (100,004 encounters)
+- Execution time: 2.75 seconds (runs: 2.859, 2.578, 2.859, 2.641). This is the slowest of the four queries.
+- Result rows: 9 (only 3 diagnoses × 3 procedures exist in this dataset).
+- Rows scanned:
+  - 100,004 rows in `encounter_procedures` (full table scan).
+  - 100,004 primary-key lookups on `encounters`.
+  - 100,004 index lookups on `encounter_diagnoses`, returning 266,673 rows (2.67 per encounter).
+  - 266,673 intermediate rows after the joins, all sorted on four VARCHAR columns before grouping.
+- Where the time goes (from EXPLAIN ANALYZE): about 60% building the 266,673 joined rows, about 40% sorting them and computing the distinct counts.
+
+Comparison: intermediate rows grew from 7 to 266,673 (about 38,000 times) and execution time grew about 12,000 times (0.228 ms → 2.75 s). This is the largest growth of the four queries. The row explosion that was invisible on the sample data (7 rows) dominates on the large dataset.
 
 Bottleneck Identified:
 
-The query joins five normalized tables and processes diagnosis and procedure relationships before grouping the results. An encounter with multiple diagnoses and procedures can produce multiple intermediate rows. MySQL then sorts the data, calculates distinct encounter counts, and sorts the final results. These operations are inexpensive with the current small sample dataset, as the measured execution time was approximately 0.228 milliseconds. However, as the data volume grows, joins, intermediate rows, sorting, grouping, and distinct-count calculations may require more processing time and memory.
+Row explosion from two junction tables. Joining two child tables on the same parent key multiplies their rows: an encounter with 3 diagnoses and 2 procedures produces 6 rows. Here, 100,004 procedure links become 266,673 intermediate rows. Each of these rows carries four text columns (codes and descriptions) that must be sorted and grouped, and the distinct count must then remove duplicate encounters within each pair. `LIMIT 20` does not help, because MySQL can only choose the top 20 after every pair has been fully counted.
+
+The join to `encounters` adds 100,004 lookups but contributes nothing, since `encounter_id` is already in both junction tables.
+
+The number of intermediate rows grows with (diagnoses per encounter) × (procedures per encounter). With real coding volumes of 5-10 diagnoses and several procedures per encounter, the explosion would be far larger than in this test data.
 
 Optimization Opportunity:
 
-A star schema can simplify analytical queries by organizing encounter-related measures in a central fact table and connecting diagnosis, procedure, and other descriptive attributes through dimensions. Appropriate indexes and a suitable fact-table design may reduce join complexity and query work. The actual performance improvement must be verified by comparing this query with its equivalent star schema query using `EXPLAIN ANALYZE`.
+Pairing diagnoses with procedures is the same work on every run, so it can be computed once by the ETL into an aggregate table: one row per (month, diagnosis, procedure) with the number of encounters. The report then only sums a small table. Bridge tables with integer keys keep the detailed relationships available for ad hoc questions, but they do not by themselves remove the row explosion.
 
 
 QUESTION 3: 30-Day Readmission Rate
+
+Definition: an index admission is an Inpatient encounter with a discharge date. It counts as readmitted if the same patient has another Inpatient encounter that starts after that discharge and no more than 30 days later. The specialty is that of the provider on the index admission.
 
 SQL Query:
 
@@ -133,10 +199,9 @@ JOIN specialties AS s
     ON p.specialty_id = s.specialty_id
 LEFT JOIN encounters AS r
     ON r.patient_id = e.patient_id
+    AND r.encounter_type = 'Inpatient'
     AND r.encounter_date > e.discharge_date
-    AND r.encounter_date <= DATE_ADD(
-        e.discharge_date, INTERVAL 30 DAY
-    )
+    AND r.encounter_date <= DATE_ADD(e.discharge_date, INTERVAL 30 DAY)
 WHERE e.encounter_type = 'Inpatient'
     AND e.discharge_date IS NOT NULL
 GROUP BY s.specialty_id, s.specialty_name
@@ -147,36 +212,59 @@ Schema Analysis:
 
 - Tables joined: `encounters` (twice), `providers`, `specialties`.
 - Number of joins: 3, including a self-join on `encounters`.
-- Join path: `encounters → providers → specialties`, with a self-join matching subsequent encounters for the same patient.
-- Aggregations: Counts eligible inpatient discharges and distinct encounters followed by a readmission, then calculates the readmission rate as a percentage.
-- Grouping: Specialty ID and specialty name.
-- Indexes used: The execution plan shows primary-key lookups on `providers` and `specialties`, and an index range scan on the second `encounters` reference to find potential readmissions.
-- Readmission detection: A subsequent encounter must belong to the same patient, occur after the original discharge, and take place within 30 days of discharge.
+- Join path: `encounters → providers → specialties`, plus `encounters (e) → encounters (r)` on the same patient.
+- How a readmission is detected: for each index admission `e`, the LEFT JOIN looks for any encounter `r` that:
+  - belongs to the same patient,
+  - is an Inpatient encounter,
+  - starts after `e.discharge_date` and no more than 30 days later.
+
+  The LEFT JOIN keeps admissions with no readmission, so they stay in the denominator. `COUNT(DISTINCT ...)` makes sure an admission followed by several readmissions is counted only once.
+- Indexes used: full table scan of `encounters` for the index admissions, primary-key lookups on `providers`, index lookups on `encounters.patient_id` for the self-join.
 
 Performance:
 
-- Execution time: Approximately 0.682 milliseconds (0.000682 seconds).
-- Actual result rows: 1 specialty group.
-- Estimated rows: The plan estimated 4 rows for the original `encounters` table scan, 1 row after filtering eligible inpatient discharges, and approximately 4 rows for the readmission index range scan. These are optimizer estimates, not counts of all rows scanned.
-- Actual rows processed: The original `encounters` table scan examined 4 rows, and the readmission index range scan examined 4 rows but found no matching readmission for the eligible encounter.
-- Execution method: MySQL `EXPLAIN ANALYZE`.
+Phase 1: Small dataset (4 encounters)
+- Execution time: 0.682 milliseconds (0.000682 seconds).
+- Result: 1 row (1 index discharge, encounter 7002, with no readmission).
+- Rows scanned: 4 encounter rows scanned to find the 1 index discharge; the self-join range scan examined 4 rows and found no match.
+
+Phase 2: Large dataset (100,004 encounters)
+- Execution time: 0.73 seconds (runs: 0.797, 0.719, 0.719, 0.750).
+- Result: 1 row (Cardiology, 25,001 index discharges, 0 readmissions, 0.00%).
+- Rows scanned:
+  - 100,004 rows in `encounters` (full table scan), filtered to 25,001 index admissions.
+  - 75,003 provider lookups (see the join-order issue below).
+  - 25,001 self-join lookups on `patient_id`, each returning about 10 encounters. That is 250,010 rows read and tested against the type and 30-day window.
+  - 25,001 rows sorted and grouped.
+- Where the time goes (from EXPLAIN ANALYZE): about 75% in the self-join, about 10% in the initial table scan, and the rest in the provider join, sorting and grouping.
+
+Comparison: index discharges grew from 1 to 25,001 and the rows examined by the self-join grew from 4 to 250,010. Execution time grew about 1,100 times (0.682 ms → 0.73 s). On the sample data the self-join had almost nothing to search; on the large dataset it accounts for most of the run time.
 
 Bottleneck Identified:
 
-The query uses a self-join on `encounters` to identify subsequent encounters for the same patient within 30 days of discharge. MySQL scans the original encounters, filters eligible inpatient discharges, and performs an index range scan to find potential readmissions. The query then groups the results, calculates distinct counts, and sorts the readmission rates. These operations may become expensive as the number of encounters increases, particularly if many records must be examined for each eligible discharge. With the current small sample dataset, the measured execution time is approximately 0.682 milliseconds, so this does not demonstrate a significant performance problem.
+1. Self-join on the largest table. Every index admission triggers a search back into `encounters` for the same patient. The `patient_id` index finds the patient's encounters, but it does not contain `encounter_type` or `encounter_date`. So every one of the patient's encounters (250,010 in total) must be fetched and checked against the type and the 30-day window. The cost grows with (index admissions) × (encounters per patient), so it rises faster than the table itself as patient history accumulates.
+2. Full table scan to find inpatient stays. `encounter_type` is not indexed, so all 100,004 encounters are read to find the 25,001 index admissions.
+3. Poor join order. The optimizer pairs each of the 25,001 admissions with all 3 specialties (75,003 combinations) and then looks up the provider for each combination to discard the two wrong ones. That is 3 times the necessary provider lookups.
+4. Repeated work. Whether an admission was followed by a readmission is a fixed fact once both stays are recorded, yet this query recomputes it from scratch on every run.
+
+Note on the result: in this dataset each patient's encounters are far apart in time, so no admission is followed by another within 30 days and the rate is 0%. Every self-join lookup therefore reads all of the patient's encounters and rejects them. The timing measures the full cost of the search.
 
 Optimization Opportunity:
 
-A composite index on `(patient_id, encounter_date)` may improve the search for subsequent encounters belonging to the same patient within the 30-day window. Its effectiveness should be verified using `EXPLAIN ANALYZE`. A star schema may also support analytical reporting by organizing encounter information in a central fact table with relevant dimensions. Any performance improvement must be measured against the original OLTP query.
+- Within OLTP: a composite index on `encounters (patient_id, encounter_type, encounter_date)` would let MySQL go directly to the patient's inpatient stays within the date window, instead of reading all of the patient's encounters. Its effect should be verified with EXPLAIN ANALYZE.
+- In a star schema: the ETL computes the readmission check once and stores it as a flag (`is_readmitted_30d`) on each index admission. The report then becomes a simple `SUM(flag) / COUNT(*)` per specialty, with no self-join at all.
+
 
 QUESTION 4: Revenue by Specialty and Month
+
+Month definition: service month (month of `encounter_date`), so revenue is attributed to the month the care was provided. The same convention is used in the star schema query.
 
 SQL Query:
 
 ```sql
 SELECT
-    YEAR(b.claim_date) AS claim_year,
-    MONTH(b.claim_date) AS claim_month,
+    YEAR(e.encounter_date) AS service_year,
+    MONTH(e.encounter_date) AS service_month,
     s.specialty_name,
     SUM(b.allowed_amount) AS total_revenue,
     COUNT(DISTINCT b.billing_id) AS total_claims
@@ -188,13 +276,13 @@ JOIN providers AS p
 JOIN specialties AS s
     ON p.specialty_id = s.specialty_id
 GROUP BY
-    YEAR(b.claim_date),
-    MONTH(b.claim_date),
+    YEAR(e.encounter_date),
+    MONTH(e.encounter_date),
     s.specialty_id,
     s.specialty_name
 ORDER BY
-    claim_year,
-    claim_month,
+    service_year,
+    service_month,
     s.specialty_name;
 ```
 
@@ -202,22 +290,62 @@ Schema Analysis:
 
 - Tables joined: `billing`, `encounters`, `providers`, `specialties`.
 - Number of joins: 3.
-- Join path: `billing → encounters → providers → specialties`.
-- Aggregations: Calculates total revenue using `SUM(b.allowed_amount)` and counts distinct billing claims.
-- Grouping: Claim year, claim month, specialty ID, and specialty name.
-- Indexes used: The execution plan shows primary-key lookups on `encounters`, `providers`, and `specialties`. The `billing` table is scanned.
+- Join chain: `billing → encounters → providers → specialties`. The measure (`allowed_amount`), the date (`encounter_date`) and the grouping attribute (`specialty_name`) are in three different tables.
+- Aggregations: `SUM(b.allowed_amount)` and a distinct count of claims.
+- Indexes used: covering index scan on `providers.specialty_id`, primary-key lookups on `specialties`, index lookups on `encounters.provider_id`, index lookups on `billing.encounter_id`.
 
 Performance:
 
-- Execution time: Approximately 0.247 milliseconds (0.000247 seconds).
-- Actual result rows: 2.
-- Estimated rows: The plan estimated approximately 2 rows for the `billing` table scan and approximately 2 rows entering the join stages. These are optimizer estimates, not counts of all rows scanned.
-- Execution method: MySQL `EXPLAIN ANALYZE`.
+Phase 1: Small dataset (4 encounters, 2 claims)
+- Execution time: 0.247 milliseconds (0.000247 seconds).
+- Result rows: 2.
+- Rows scanned: 2 billing rows, with primary-key lookups on `encounters`, `providers` and `specialties`.
+
+Phase 2: Large dataset (100,004 encounters, 100,002 claims)
+- Execution time: 0.89 seconds (runs: 1.000, 0.828, 0.875, 0.906).
+- Result rows: 168.
+- Rows scanned:
+  - 3 provider rows and 3 specialty lookups.
+  - 100,004 encounter rows through the `provider_id` index.
+  - 100,004 index lookups on `billing.encounter_id`, plus a row fetch for each to read `allowed_amount`.
+  - 100,002 joined rows sorted before grouping.
+- Where the time goes (from EXPLAIN ANALYZE): about 55% joining billing to encounters, about 20% walking the provider chain, and the rest sorting and grouping.
+
+Comparison: claims grew 50,000 times (2 → 100,002) and execution time grew about 3,600 times (0.247 ms → 0.89 s). On the sample data MySQL started from the 2 billing rows; on the large dataset it walks every encounter through the provider chain and looks up its claim.
 
 Bottleneck Identified:
 
-The query joins four normalized tables and aggregates billing amounts by claim month and specialty. MySQL scans the billing table, performs primary-key lookups for related encounters, providers, and specialties, and then sorts and groups the results. These operations are inexpensive with the current small sample dataset, as the measured execution time was approximately 0.247 milliseconds. However, as billing records increase, table scans, joins, sorting, and aggregation may require more processing time and memory.
+This is the longest join chain of the four queries. MySQL does everything Q1 does (walking all 100,004 encounters through the provider chain) and then performs one more lookup per encounter into `billing`. The `billing.encounter_id` index does not contain the amount, so each match needs a further read of the table row. That is roughly 200,000 random lookups to produce a 168-row report. Grouping on `YEAR()` and `MONTH()` forces a full sort of all 100,002 joined rows.
+
+`COUNT(DISTINCT b.billing_id)` adds de-duplication work that is not needed, because `billing_id` is the primary key and cannot repeat; `COUNT(*)` gives the same result.
+
+If an encounter had several billing rows (resubmitted or split claims), the join would also produce one row per claim, so encounter-level counts would need extra care.
 
 Optimization Opportunity:
 
-A star schema can simplify analytical queries by organizing billing measures in a central fact table and connecting date and specialty attributes through dimensions. Appropriate indexes and pre-aggregated revenue measures may reduce query work, depending on the final schema and data volume. The performance improvement must be verified by running the equivalent query against the star schema and comparing execution times and execution plans.
+The ETL can sum billing per encounter once and store `total_allowed_amount`, `total_claim_amount` and `claim_count` on the fact row, next to `specialty_key` and the integer date key. A covering index on (specialty, date, claim count, amounts) then answers the query from the index alone, without touching `billing`, `providers` or `specialties` until the final 168 rows are labelled.
+
+
+SUMMARY
+
+Execution time, small vs large dataset
+
+Query                          Joins   Small (4 enc.)   Large (100,004 enc.)   Growth
+Q1 Encounters by specialty       2     0.123 ms         0.40 s                 ~3,300x
+Q2 Diagnosis-procedure pairs     4     0.228 ms         2.75 s                 ~12,000x
+Q3 30-day readmissions           3     0.682 ms         0.73 s                 ~1,100x
+Q4 Revenue by specialty          3     0.247 ms         0.89 s                 ~3,600x
+
+The two phases use different timers (EXPLAIN ANALYZE for the small dataset, Workbench duration for the large one), so the growth figures are approximate. The conclusion does not depend on that: every query moved from under a millisecond to between 0.4 and 2.75 seconds.
+
+Bottlenecks on the large dataset
+
+Query                          Rows scanned (main cost)                  Main bottleneck
+Q1 Encounters by specialty     100,004 encounters via provider chain     join chain + sort/distinct on 100K rows
+Q2 Diagnosis-procedure pairs   266,673 intermediate rows                 row explosion from two junction tables
+Q3 30-day readmissions         250,010 rows in the self-join             self-join + full table scan
+Q4 Revenue by specialty        ~200,000 lookups across 4 tables          longest join chain + sort
+
+What the two phases show: on the small dataset all four queries looked equally cheap and no bottleneck could be identified. On the large dataset their costs separate clearly. Q2 is the slowest, because its row explosion grows faster than the data itself. Performance problems in normalized schemas often only appear at realistic volume, which is why the star schema was evaluated against the large dataset.
+
+Common pattern: every query reads all encounters, walks the same join chain to find the specialty, and recomputes derived results (pairs, readmissions, billing totals) on every run. The normalized schema is designed to record individual encounters correctly. These analytical questions instead need to scan and regroup all of them, which is the work the star schema is designed to remove.

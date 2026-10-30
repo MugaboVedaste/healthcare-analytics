@@ -50,8 +50,8 @@ CREATE TABLE encounters (
     patient_id INT NOT NULL,
     provider_id INT NOT NULL,
     encounter_type VARCHAR(50),
-    encounter_date DATE NOT NULL,
-    discharge_date DATE,
+    encounter_date DATETIME NOT NULL,   -- was DATE: kept only the day, dropped the time
+    discharge_date DATETIME,
     department_id INT,
     FOREIGN KEY (patient_id)
         REFERENCES patients(patient_id),

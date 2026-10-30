@@ -1,10 +1,6 @@
-
 USE healthcare_analytics;
 
--- Query 1: Monthly Encounters by Specialty
--- Purpose: Count encounters and unique patients
--- by month, specialty, and encounter type.
-
+-- QUESTION 1: Monthly Encounters by Specialty
 SELECT
     YEAR(e.encounter_date) AS encounter_year,
     MONTH(e.encounter_date) AS encounter_month,
@@ -27,10 +23,8 @@ ORDER BY
     encounter_month,
     s.specialty_name,
     e.encounter_type;
-    
 
-
--- Query 2: Top Diagnosis-Procedure Pairs
+-- QUESTION 2: Top Diagnosis-Procedure Pairs
 SELECT
     d.icd10_code,
     d.icd10_description,
@@ -54,10 +48,10 @@ GROUP BY
 ORDER BY
     encounter_count DESC,
     d.icd10_code,
-    pr.cpt_code;
+    pr.cpt_code
+LIMIT 20;                                        -- CHANGED: top 20, same as star query
 
 -- QUESTION 3: 30-Day Readmission Rate
-
 SELECT
     s.specialty_name,
     COUNT(DISTINCT e.encounter_id) AS total_inpatient_discharges,
@@ -77,21 +71,18 @@ JOIN specialties AS s
     ON p.specialty_id = s.specialty_id
 LEFT JOIN encounters AS r
     ON r.patient_id = e.patient_id
+    AND r.encounter_type = 'Inpatient'           -- CHANGED: inpatient-to-inpatient, same as star query
     AND r.encounter_date > e.discharge_date
-    AND r.encounter_date <= DATE_ADD(
-        e.discharge_date, INTERVAL 30 DAY
-    )
+    AND r.encounter_date <= DATE_ADD(e.discharge_date, INTERVAL 30 DAY)
 WHERE e.encounter_type = 'Inpatient'
     AND e.discharge_date IS NOT NULL
 GROUP BY s.specialty_id, s.specialty_name
 ORDER BY readmission_rate_percentage DESC;
 
-
--- QUESTION 4: Revenue by Specialty and Month
-
+-- QUESTION 4: Revenue by Specialty and Month (service month)
 SELECT
-    YEAR(b.claim_date) AS claim_year,
-    MONTH(b.claim_date) AS claim_month,
+    YEAR(e.encounter_date) AS service_year,      -- CHANGED: was b.claim_date
+    MONTH(e.encounter_date) AS service_month,    -- CHANGED: was b.claim_date
     s.specialty_name,
     SUM(b.allowed_amount) AS total_revenue,
     COUNT(DISTINCT b.billing_id) AS total_claims
@@ -103,11 +94,11 @@ JOIN providers AS p
 JOIN specialties AS s
     ON p.specialty_id = s.specialty_id
 GROUP BY
-    YEAR(b.claim_date),
-    MONTH(b.claim_date),
+    YEAR(e.encounter_date),
+    MONTH(e.encounter_date),
     s.specialty_id,
     s.specialty_name
 ORDER BY
-    claim_year,
-    claim_month,
+    service_year,
+    service_month,
     s.specialty_name;
