@@ -1,31 +1,33 @@
-HEALTHCARE ANALYTICS: OLTP TO STAR SCHEMA
+# HEALTHCARE ANALYTICS: OLTP TO STAR SCHEMA
 
-PART 3.1: DESIGN DECISIONS
+## PART 3.1: DESIGN DECISIONS
 
-Decision 1: Fact Table Grain
+### Decision 1: Fact Table Grain
 
-Choice: Option A — One row per encounter.
+**Choice: One row per encounter.**
 
-The grain of `fact_encounters` will be one row per healthcare encounter. Each row represents a single patient encounter and stores foreign keys to the relevant dimensions, together with measurable encounter attributes.
+The grain of `fact_encounters` is one row per healthcare encounter. Each record represents a single patient encounter and contains foreign keys to the relevant dimension tables, together with measurable attributes and precomputed analytical indicators.
 
-This grain is appropriate for the four analytical queries because:
+This grain supports the four analytical queries:
 
-- Query 1: Monthly encounters can be counted by date, specialty, and encounter type.
-- Query 2: Diagnosis–procedure combinations can be analyzed through bridge tables connected to encounters.
-- Query 3: Readmissions can be identified by comparing encounters for the same patient and checking the discharge and subsequent encounter dates.
-- Query 4: Revenue can be analyzed using billing information associated with encounters.
+- **Query 1 – Monthly Encounter Analysis:** Encounters can be grouped by encounter date, specialty, and encounter type.
+- **Query 2 – Diagnosis–Procedure Analysis:** Diagnosis and procedure relationships are maintained through bridge tables, allowing combinations to be analyzed without duplicating encounter records.
+- **Query 3 – Readmission Analysis:** Precomputed readmission indicators support the calculation of inpatient readmission rates by specialty.
+- **Query 4 – Revenue Analysis:** Billing amounts are aggregated at encounter level and stored in the fact table, supporting revenue analysis by specialty and month.
 
-A separate `fact_billing` table will also be considered for revenue analysis. Its grain will be one row per billing record. This preserves the claim date and individual billing amounts if an encounter has multiple claims, preventing revenue from being assigned incorrectly to a single encounter date.
+The model uses a central encounter fact table rather than a separate billing fact table. This simplifies the analytical model and supports the reporting requirements using encounter-level billing aggregates.
 
-Decision 2: Dimension Tables
+### Decision 2: Dimension Tables
 
-1. Date Dimension — `dim_date`
+The warehouse contains the following dimension tables:
+
+**1. Date Dimension – `dim_date`**
 
 Purpose: Provides calendar attributes for grouping and filtering analytical data.
 
-Attributes:
-- `date_key` — surrogate primary key, formatted as YYYYMMDD.
-- `calendar_date` — actual calendar date.
+Key attributes include:
+- `date_key` – surrogate primary key formatted as YYYYMMDD.
+- `calendar_date` – actual calendar date.
 - `day`
 - `day_of_week`
 - `day_name`
@@ -33,122 +35,162 @@ Attributes:
 - `month_name`
 - `quarter`
 - `year`
+- `year_month_key` – supports monthly aggregation.
+- `month_label` – provides a readable month label for reports.
 
-The date dimension will support encounter-date, discharge-date, and claim-date analysis through separate foreign-key roles where appropriate.
+The date dimension supports time-based analysis, particularly monthly encounter and revenue reporting.
 
-2. Patient Dimension — `dim_patient`
+**2. Patient Dimension – `dim_patient`**
 
 Purpose: Provides descriptive information about patients.
 
-Attributes:
-- `patient_key` — surrogate primary key.
-- `patient_id` — original OLTP patient identifier.
-- `first_name`
-- `last_name`
-- `gender`
-- `date_of_birth`
-- `age_group`
+Key attributes include:
+- `patient_key` – surrogate primary key.
+- `patient_id` – original OLTP patient identifier.
+- Patient descriptive attributes such as name, gender, date of birth, and age group, where available in the implemented schema.
 
-The age group can support patient segmentation without repeatedly calculating age in analytical queries. If it is stored, its calculation and update rules must be documented.
+This dimension supports patient-level analysis and the identification of unique patients across encounters.
 
-3. Provider Dimension — `dim_provider`
+**3. Provider Dimension – `dim_provider`**
 
-Purpose: Provides descriptive information about healthcare providers.
+Purpose: Stores descriptive information about healthcare providers.
 
-Attributes:
-- `provider_key` — surrogate primary key.
-- `provider_id` — original OLTP provider identifier.
-- `provider_name`
-- `credential`
-- `specialty_key` — reference to `dim_specialty`.
-- `department_key` — reference to `dim_department`.
+Key attributes include:
+- `provider_key` – surrogate primary key.
+- `provider_id` – original OLTP provider identifier.
+- Provider descriptive attributes, including provider name and credential.
+- Specialty and department relationships.
 
-4. Specialty Dimension — `dim_specialty`
+The provider dimension uses **Slowly Changing Dimension Type 2 (SCD Type 2)** to preserve historical changes. This allows the warehouse to retain the provider's historical attributes rather than overwriting previous values.
+
+**4. Specialty Dimension – `dim_specialty`**
 
 Purpose: Supports reporting and comparison by medical specialty.
 
-Attributes:
-- `specialty_key` — surrogate primary key.
-- `specialty_id` — original OLTP specialty identifier.
+Key attributes include:
+- `specialty_key` – surrogate primary key.
+- `specialty_id` – original OLTP specialty identifier.
 - `specialty_name`
 - `specialty_code`
 
-5. Department Dimension — `dim_department`
+This dimension supports comparisons of encounter volumes, readmission rates, and billing performance across specialties.
 
-Purpose: Supports analysis by hospital department.
+**5. Department Dimension – `dim_department`**
 
-Attributes:
-- `department_key` — surrogate primary key.
-- `department_id` — original OLTP department identifier.
+Purpose: Provides information about hospital departments.
+
+Key attributes include:
+- `department_key` – surrogate primary key.
+- `department_id` – original OLTP department identifier.
 - `department_name`
 - `floor`
 - `capacity`
 
-6. Encounter Type Dimension — `dim_encounter_type`
+This dimension supports analysis of healthcare activities across hospital departments.
 
-Purpose: Groups encounters by their type.
+**6. Encounter Type Dimension – `dim_encounter_type`**
 
-Attributes:
-- `encounter_type_key` — surrogate primary key.
-- `type_name`
+Purpose: Categorizes healthcare encounters according to their type.
+
+Key attributes include:
+- `encounter_type_key` – surrogate primary key.
+- Encounter type name.
 
 Examples include Inpatient, Outpatient, and ER, based on the source data.
 
-7. Diagnosis Dimension — `dim_diagnosis`
+**7. Diagnosis Dimension – `dim_diagnosis`**
 
 Purpose: Provides descriptive information for diagnosis analysis.
 
-Attributes:
-- `diagnosis_key` — surrogate primary key.
-- `diagnosis_id` — original OLTP diagnosis identifier.
+Key attributes include:
+- `diagnosis_key` – surrogate primary key.
+- `diagnosis_id` – original OLTP diagnosis identifier.
 - `icd10_code`
 - `icd10_description`
 
-8. Procedure Dimension — `dim_procedure`
+**8. Procedure Dimension – `dim_procedure`**
 
 Purpose: Provides descriptive information for procedure analysis.
 
-Attributes:
-- `procedure_key` — surrogate primary key.
-- `procedure_id` — original OLTP procedure identifier.
+Key attributes include:
+- `procedure_key` – surrogate primary key.
+- `procedure_id` – original OLTP procedure identifier.
 - `cpt_code`
 - `cpt_description`
 
-Decision 3: Pre-Aggregated Metrics
+The dimensions use **Slowly Changing Dimension Type 1 (SCD Type 1)** by default, meaning updates overwrite previous attribute values. The provider dimension is the exception because it uses SCD Type 2 to preserve historical changes.
 
-The `fact_encounters` table will contain the following measures:
+### Decision 3: Precomputed Measures and Analytical Indicators
 
-- `diagnosis_count` — number of diagnoses associated with the encounter.
-- `procedure_count` — number of procedures associated with the encounter.
-- `total_claim_amount` — sum of claim amounts associated with the encounter.
-- `total_allowed` — sum of allowed billing amounts associated with the encounter.
+To improve analytical query performance, frequently used measures and indicators are calculated during ETL and stored in the warehouse.
 
-These measures can reduce repeated aggregation work for common analytical reports.
+The `fact_encounters` table contains the following important measures:
 
-Diagnosis and procedure counts will be calculated from their respective OLTP relationship tables during ETL. Billing amounts will be aggregated from `billing` at the encounter level for `fact_encounters`.
+- `claim_count` – number of billing claims associated with an encounter.
+- `total_claim_amount` – total claimed amount associated with an encounter.
+- `total_allowed_amount` – total allowed billing amount associated with an encounter.
 
-The separate `fact_billing` table will preserve individual billing records and their claim dates for accurate revenue-by-month analysis. This avoids losing billing-level detail when an encounter has multiple claims.
+These billing measures are aggregated from the OLTP `billing` table at the encounter level during ETL. This reduces the need to repeatedly join and aggregate billing records when executing revenue reports.
 
-Readmission rate will be calculated from encounter dates and discharge dates rather than stored as a fixed encounter-level measure, because readmission depends on subsequent encounters.
+The fact table also stores precomputed readmission indicators, including:
 
-Decision 4: Bridge Tables
+- `is_index_admission` – identifies an encounter that qualifies as an index admission.
+- `is_readmitted_30d` – indicates whether the patient was readmitted within the defined 30-day period.
+- `days_to_next_admission` – records the number of days until the next qualifying admission.
+- `is_readmission` – identifies a readmission according to the implemented business rules.
 
-Two bridge tables will be created:
+These indicators allow readmission analysis to use precomputed values instead of repeatedly comparing encounters and calculating date differences during report execution.
 
-1. `bridge_encounter_diagnoses`
-   - Connects encounters to their associated diagnoses.
-   - Stores the encounter key and diagnosis key.
-   - Can preserve diagnosis sequence where required.
+### Decision 4: Bridge Tables
 
-2. `bridge_encounter_procedures`
-   - Connects encounters to their associated procedures.
-   - Stores the encounter key and procedure key.
-   - Can preserve procedure date where required.
+Two bridge tables maintain the many-to-many relationships between encounters, diagnoses, and procedures.
 
-Bridge tables are necessary because one encounter can have multiple diagnoses and multiple procedures, and each diagnosis or procedure can be associated with many encounters.
+**1. `bridge_encounter_diagnoses`**
 
-Keeping these relationships in bridge tables avoids duplicating the encounter fact row for every diagnosis–procedure combination. It also supports Question 2 without losing the original many-to-many relationships.
+- Connects encounters to their associated diagnoses.
+- Stores the encounter key and diagnosis key.
+- Maintains the relationship between each encounter and its diagnoses.
 
-Conclusion
+**2. `bridge_encounter_procedures`**
 
-The proposed model uses a central encounter fact table with descriptive dimensions, bridge tables for diagnoses and procedures, and a billing fact table for claim-level revenue analysis. This design supports the four analytical questions while maintaining the detail needed for correct counts, readmission analysis, and revenue reporting.
+- Connects encounters to their associated procedures.
+- Stores the encounter key and procedure key.
+- Maintains the relationship between each encounter and its procedures.
+
+Bridge tables are necessary because one encounter can have multiple diagnoses and procedures, while each diagnosis or procedure can be associated with multiple encounters.
+
+Keeping these relationships separate prevents the duplication of encounter-level fact records when an encounter has multiple diagnoses and procedures.
+
+### Decision 5: Pre-Aggregated Diagnosis–Procedure Data
+
+An additional table, `agg_dx_px_pairs_monthly`, is used to improve the performance of diagnosis–procedure combination analysis.
+
+The table stores aggregated diagnosis–procedure combinations by month.
+
+Its key attributes include:
+- `year_month_key`
+- `diagnosis_key`
+- `procedure_key`
+- `encounter_count`
+
+This table reduces the need to repeatedly join the encounter fact table with both bridge tables and calculate diagnosis–procedure combinations from the detailed relationships.
+
+It supports Query 2 by providing pre-aggregated counts that can be used to identify the most frequent diagnosis–procedure combinations.
+
+### Decision 6: Handling Unknown Dimension Values
+
+The warehouse uses a default surrogate key of `-1` for unknown or unavailable dimension values.
+
+This approach ensures that fact records can still be loaded when a corresponding dimension value is missing or unavailable.
+
+It also helps maintain referential integrity between fact and dimension tables without unnecessarily excluding encounter records during ETL.
+
+### Conclusion
+
+The implemented healthcare analytics warehouse uses a star-schema design centered on `fact_encounters`, with descriptive dimension tables for patients, providers, specialties, departments, encounter types, diagnoses, procedures, and dates.
+
+Bridge tables preserve the many-to-many relationships between encounters, diagnoses, and procedures. The `agg_dx_px_pairs_monthly` table provides pre-aggregated data for diagnosis–procedure analysis.
+
+Billing measures and readmission indicators are calculated during ETL and stored in the encounter fact table to reduce repeated calculations during analytical queries. The provider dimension uses SCD Type 2 to preserve historical changes, while the other dimensions use SCD Type 1.
+
+Overall, the design supports the four analytical queries while improving query performance, maintaining important source relationships, and providing a structure suitable for healthcare reporting and analysis.
