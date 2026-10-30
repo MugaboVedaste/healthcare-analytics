@@ -1,8 +1,264 @@
 # Star Schema Queries
 
+Database: healthcare_analytics_dw (MySQL 8.0), loaded from healthcare_analytics by etl_load.sql.
+
+## Test Approach
+
+The star schema queries were tested in the same two phases as the OLTP queries (see query_analysis.txt).
+
+**Phase 1: Small dataset.** The 4 sample encounters from the project brief, measured with MySQL `EXPLAIN ANALYZE` in milliseconds.
+
+**Phase 2: Large dataset.** The 4 sample encounters plus 100,000 synthetic encounters (100,004 in total), loaded into the star schema by the ETL in about 24 seconds. The reconciliation checks showed 0 difference in encounter count, allowed amount, diagnosis links and procedure links. Measurements:
+
+- **Execution time:** MySQL Workbench duration, median of 5 runs. This is the number used for the improvement factors.
+- **Server time:** MySQL `EXPLAIN ANALYZE` on an identical copy of the data. It is reported where Workbench cannot measure precisely. Workbench on Windows counts in steps of about 16 ms, so very fast queries show as 0.000 or 0.016 seconds.
+
+**Query versions.** Phase 1 was measured with an earlier draft of the star schema (a separate `fact_billing` table, `claim_date_key`, `year_number` / `month_number` columns) and earlier query versions. These are kept in the appendix. Before Phase 2, the schema was finalized as in star_schema.sql and the queries were rewritten to match it and to answer exactly the same question as the OLTP queries. The SQL shown for each question is the final version measured in Phase 2. Every Phase 2 star query returned the same results as its OLTP counterpart.
+
+---
+
 ## Question 1: Monthly Encounters by Specialty
 
 ### The SQL (optimized for star schema)
+
+```sql
+SELECT m.month_label                 AS encounter_month,
+       s.specialty_name,
+       t.encounter_type_name         AS encounter_type,
+       a.total_encounters,
+       a.unique_patients
+FROM (
+    SELECT f.encounter_date_key DIV 100     AS year_month_key,
+           f.specialty_key,
+           f.encounter_type_key,
+           COUNT(*)                         AS total_encounters,
+           COUNT(DISTINCT f.patient_key)    AS unique_patients
+    FROM fact_encounters f
+    GROUP BY f.encounter_date_key DIV 100, f.specialty_key, f.encounter_type_key
+) a
+JOIN (SELECT DISTINCT year_month_key, month_label FROM dim_date) m ON m.year_month_key = a.year_month_key
+JOIN dim_specialty      s ON s.specialty_key      = a.specialty_key
+JOIN dim_encounter_type t ON t.encounter_type_key = a.encounter_type_key
+ORDER BY encounter_month, s.specialty_name, encounter_type;
+```
+
+### 1. Execution time
+
+| | OLTP | Star schema |
+|---|---|---|
+| Phase 1: small dataset (4 encounters) | 0.123 ms | 0.175 ms |
+| Phase 2: large dataset (100,004 encounters) | 0.40 s | 0.094 s (runs: 0.109, 0.078, 0.094, 0.110, 0.094) |
+
+Phase 2 server time (`EXPLAIN ANALYZE`): about 67 ms for the star query, compared with about 260 ms for the OLTP query on the same machine.
+
+### 2. Improvement factor
+
+- **Phase 1:** the star schema was about **1.4× slower** (0.175 / 0.123).
+- **Phase 2:** the star schema was about **4.3× faster** (0.40 / 0.094).
+
+### 3. Explanation
+
+On the small dataset there is nothing to optimize. With 4 encounters, joining the three dimension tables costs more than walking the OLTP provider chain, so the star schema was slightly slower.
+
+On the large dataset, four design choices make the star query faster:
+
+- **Denormalization:** `specialty_key` is stored on every fact row (the provider's specialty at the time of the encounter), so the `encounters → providers → specialties` hop is gone.
+- **Covering index:** `idx_fact_q1 (encounter_date_key, specialty_key, encounter_type_key, patient_key)` contains every column the inner query needs. MySQL reads only the index, never the table rows.
+- **Integer date key:** `encounter_date_key DIV 100` turns YYYYMMDD into YYYYMM with integer arithmetic, instead of calling `YEAR()` and `MONTH()` on 100,004 DATETIME values.
+- **Aggregate first, then add labels:** the inner query groups 100,004 fact rows into 171 rows using integer keys. The dimension names are joined only to those 171 rows.
+
+`COUNT(*)` replaces `COUNT(DISTINCT encounter_id)`, because the fact table has one row per encounter. `COUNT(DISTINCT patient_key)` is still needed, and it accounts for most of the remaining time.
+
+---
+
+## Question 2: Top Diagnosis–Procedure Pairs
+
+### The SQL (optimized for star schema)
+
+```sql
+SELECT dx.icd10_code, dx.icd10_description, px.cpt_code, px.cpt_description,
+       a.encounter_count
+FROM (SELECT diagnosis_key, procedure_key, SUM(encounter_count) AS encounter_count
+      FROM agg_dx_px_pairs_monthly
+      GROUP BY diagnosis_key, procedure_key
+      ORDER BY encounter_count DESC
+      LIMIT 20) a
+JOIN dim_diagnosis dx ON dx.diagnosis_key = a.diagnosis_key
+JOIN dim_procedure px ON px.procedure_key = a.procedure_key
+ORDER BY a.encounter_count DESC;
+```
+
+### 1. Execution time
+
+| | OLTP | Star schema |
+|---|---|---|
+| Phase 1: small dataset (4 encounters) | 0.228 ms | 0.957 ms |
+| Phase 2: large dataset (100,004 encounters) | 2.75 s | under 0.016 s (Workbench showed 0.000 on all 5 runs) |
+
+Phase 2 server time (`EXPLAIN ANALYZE`): about 0.27 ms for the star query, compared with about 1,200 ms for the OLTP query on the same machine.
+
+### 2. Improvement factor
+
+- **Phase 1:** the star schema was about **4.2× slower** (0.957 / 0.228).
+- **Phase 2:** the star schema was **more than 170× faster** by Workbench timing (2.75 s / under 0.016 s). Workbench cannot measure the star query precisely; by server time it is several thousand times faster.
+
+### 3. Explanation
+
+The Phase 1 version joined the two bridge tables directly at query time. That still has to build every diagnosis × procedure combination per encounter, and on 4 encounters the extra temporary table and sort made it slower than OLTP.
+
+The final version reads the pre-computed aggregate `agg_dx_px_pairs_monthly`. The ETL builds it once from the bridge tables:
+
+- It holds one row per (month, diagnosis, procedure).
+- Each row stores the number of distinct encounters that have both codes.
+- Every encounter falls in exactly one month, so the monthly counts can be added up for any date range.
+
+The report therefore sums 449 small rows instead of creating and sorting 266,673 joined rows. It then attaches the code descriptions to only the top pairs.
+
+The bridge tables are still kept, because they hold the detailed encounter–code links for ad hoc questions (for example, pairs only among patients over 65). Querying the bridges directly does not remove the row explosion; only pre-computing it in the ETL does.
+
+Caveat: this dataset has only 3 diagnoses and 3 procedures, so the aggregate is very small (449 rows). With a realistic number of ICD-10 and CPT codes, the aggregate would be much larger and the query slower, but it would still avoid the run-time explosion.
+
+---
+
+## Question 3: 30-Day Readmission Rate
+
+### The SQL (optimized for star schema)
+
+```sql
+SELECT s.specialty_name,
+       COUNT(*)                                              AS index_discharges,
+       SUM(f.is_readmitted_30d)                              AS readmissions,
+       ROUND(100.0 * SUM(f.is_readmitted_30d) / COUNT(*), 2) AS readmission_rate_pct
+FROM fact_encounters f
+JOIN dim_specialty s ON s.specialty_key = f.specialty_key
+WHERE f.is_index_admission = TRUE
+GROUP BY s.specialty_name
+ORDER BY readmission_rate_pct DESC;
+```
+
+### 1. Execution time
+
+| | OLTP | Star schema |
+|---|---|---|
+| Phase 1: small dataset (4 encounters) | 0.682 ms | 0.322 ms |
+| Phase 2: large dataset (100,004 encounters) | 0.73 s | about 0.016 s (runs: 0.047, 0.015, 0.031, 0.016, 0.016) |
+
+Phase 2 server time (`EXPLAIN ANALYZE`): about 18 ms for the star query, compared with about 500 ms for the OLTP query on the same machine.
+
+### 2. Improvement factor
+
+- **Phase 1:** the star schema was about **2.1× faster** (0.682 / 0.322).
+- **Phase 2:** the star schema was about **46× faster** by Workbench timing (0.73 / 0.016), and about **28× faster** by server time (500 ms / 18 ms). Workbench is at the limit of its resolution here, so the server-time ratio is the more reliable figure.
+
+### 3. Explanation
+
+The Phase 1 version still performed the self-join on the fact table at query time. It was faster than OLTP because it searched by `patient_key` and datetime on the fact table instead of walking the provider chain.
+
+The final version removes the self-join from the report entirely:
+
+- **Pre-computed flags:** the ETL decides once whether each inpatient stay was followed by another inpatient admission within 30 days. It stores the answer as `is_index_admission` and `is_readmitted_30d` on the fact row.
+- **Filtered covering index:** `idx_fact_q3 (is_index_admission, specialty_key, is_readmitted_30d)` lets MySQL read only the 25,001 index admissions, directly from the index. The other 75,003 encounters are never touched.
+- **Simple arithmetic:** the readmission rate is `SUM(flag) / COUNT(*)`. There is no `COUNT(DISTINCT ...)` and no date-window comparison at run time.
+
+The OLTP query read 100,004 encounters plus 250,010 rows in its self-join. The star query reads 25,001 index entries.
+
+Result check: both queries return the same result on this dataset (Cardiology, 25,001 index discharges, 0 readmissions, 0.00%). Because no patient in this dataset returns within 30 days, the rate is 0% in both schemas.
+
+---
+
+## Question 4: Revenue by Specialty and Month
+
+### The SQL (optimized for star schema)
+
+```sql
+SELECT s.specialty_name,
+       m.month_label         AS service_month,
+       a.total_allowed,
+       a.total_claimed,
+       a.billed_encounters
+FROM (
+    SELECT f.specialty_key,
+           f.encounter_date_key DIV 100   AS year_month_key,
+           SUM(f.total_allowed_amount)    AS total_allowed,
+           SUM(f.total_claim_amount)      AS total_claimed,
+           SUM(f.claim_count > 0)         AS billed_encounters
+    FROM fact_encounters f
+    GROUP BY f.specialty_key, f.encounter_date_key DIV 100
+) a
+JOIN dim_specialty s ON s.specialty_key = a.specialty_key
+JOIN (SELECT DISTINCT year_month_key, month_label FROM dim_date) m ON m.year_month_key = a.year_month_key
+WHERE a.billed_encounters > 0
+ORDER BY s.specialty_name, service_month;
+```
+
+### 1. Execution time
+
+| | OLTP | Star schema |
+|---|---|---|
+| Phase 1: small dataset (2 claims) | 0.247 ms | 0.275 ms |
+| Phase 2: large dataset (100,002 claims) | 0.89 s | 0.125 s (runs: 0.125, 0.109, 0.125, 0.125, 0.125) |
+
+Phase 2 server time (`EXPLAIN ANALYZE`): about 72 ms for the star query, compared with about 480 ms for the OLTP query on the same machine.
+
+### 2. Improvement factor
+
+- **Phase 1:** the star schema was about **1.1× slower** (0.275 / 0.247).
+- **Phase 2:** the star schema was about **7.1× faster** (0.89 / 0.125).
+
+### 3. Explanation
+
+The Phase 1 version used a separate billing fact table, so it still joined billing to encounters at query time. With only 2 claims, that join and the dimension lookups cost slightly more than the OLTP query.
+
+The final version stores billing on the encounter fact row:
+
+- **Pre-aggregated measures:** the ETL sums each encounter's claims once into `total_allowed_amount`, `total_claim_amount` and `claim_count`. The query never touches billing data at run time.
+- **Denormalized specialty:** `specialty_key` is on the fact row, so the 3-hop `billing → encounters → providers → specialties` chain is gone.
+- **Covering index:** `idx_fact_q4 (specialty_key, encounter_date_key, claim_count, total_allowed_amount, total_claim_amount)` contains every column the query needs. MySQL reads only the index.
+- **Aggregate first:** 100,004 fact rows are grouped into 168 rows on integer keys before the specialty and month labels are attached.
+
+The OLTP query needed about 200,000 random lookups across four tables. The star query is one pass over a single index.
+
+Revenue is grouped by service month (the month of the encounter) in both schemas. The `WHERE a.billed_encounters > 0` filter keeps only months with claims, matching the OLTP query, which starts from the billing table.
+
+---
+
+## Summary
+
+### Execution time, OLTP vs star schema
+
+| Query | Phase 1: OLTP | Phase 1: Star | Phase 1 result | Phase 2: OLTP | Phase 2: Star | Phase 2 result |
+|---|---|---|---|---|---|---|
+| Q1 Encounters by specialty | 0.123 ms | 0.175 ms | 1.4× slower | 0.40 s | 0.094 s | **4.3× faster** |
+| Q2 Diagnosis–procedure pairs | 0.228 ms | 0.957 ms | 4.2× slower | 2.75 s | < 0.016 s | **> 170× faster** |
+| Q3 30-day readmissions | 0.682 ms | 0.322 ms | 2.1× faster | 0.73 s | ~0.016 s | **~28–46× faster** |
+| Q4 Revenue by specialty | 0.247 ms | 0.275 ms | 1.1× slower | 0.89 s | 0.125 s | **7.1× faster** |
+
+### What the two phases show
+
+- **On the small dataset**, the star schema was slower for three of the four queries. With 4 encounters every query finishes in under 1 ms, and the fixed cost of joining extra dimension tables outweighs any saving. Phase 1 alone would wrongly suggest the star schema does not help.
+- **On the large dataset**, the star schema was faster for all four queries.
+- **Two kinds of gain:**
+  - Denormalized keys and covering indexes gave 4–7× (Q1, Q4).
+  - Moving expensive logic into the ETL gave the largest gains: the readmission self-join for Q3, and the diagnosis–procedure pairing for Q2.
+- **The cost:**
+  - The ETL took about 24 seconds to load 100,004 encounters.
+  - The warehouse duplicates data that already exists in the OLTP schema.
+  - Reports are only as current as the last load.
+
+  The queries repay the load time after a handful of runs, and they keep the analytical workload off the production database.
+
+---
+
+## Appendix: Phase 1 query versions
+
+These are the queries measured in Phase 1, against the earlier draft of the star schema. They are kept as a record of the testing; they do not run against the final schema in star_schema.sql. The main differences from the final versions:
+
+- **Q1:** joined the dimensions to every fact row instead of aggregating first.
+- **Q2:** joined the two bridge tables at query time, counted pair rows with `COUNT(*)` instead of distinct encounters, and returned the top 5.
+- **Q3:** performed the self-join on the fact table at query time. It did not limit the return visit to inpatient stays or exclude stays without a discharge date. On the sample data this gives the same result.
+- **Q4:** used a separate `fact_billing` table and grouped by claim month instead of service month.
+
+### Q1 (Phase 1)
 
 ```sql
 SELECT
@@ -33,28 +289,7 @@ ORDER BY
     et.encounter_type_name;
 ```
 
-### 1. Execution time estimate
-
-- Star schema: ~0.175 ms
-- Original OLTP schema: ~0.123 ms
-
-### 2. Improvement factor
-
-The star schema was approximately **1.42× slower** on this sample dataset.
-
-Calculation: 0.175 / 0.123 ≈ 1.42.
-
-### 3. Explanation
-
-The fact table stores the specialty, patient, encounter type, and date keys needed for analysis. This avoids joining the OLTP providers table to retrieve the specialty. The date dimension provides year and month attributes for grouping.
-
-However, the star schema was not faster in this test. With only four encounters, the overhead of grouping, sorting, and accessing dimension tables can outweigh the benefits of dimensional modeling.
-
----
-
-## Question 2: Top Diagnosis–Procedure Pairs
-
-### The SQL (optimized for star schema)
+### Q2 (Phase 1)
 
 ```sql
 SELECT
@@ -84,26 +319,7 @@ ORDER BY
 LIMIT 5;
 ```
 
-### 1. Execution time estimate
-
-- Star schema: ~0.957 ms
-- Original OLTP schema: ~0.228 ms
-
-### 2. Improvement factor
-
-The star schema was approximately **4.20× slower** on this sample dataset.
-
-Calculation: 0.957 / 0.228 ≈ 4.20.
-
-### 3. Explanation
-
-The bridge tables connect diagnoses and procedures through their shared encounter key. The dimension tables provide diagnosis and procedure descriptions.
-
-MySQL uses index lookups to retrieve the related records, but it also creates a temporary table for aggregation and sorts the results to return the top five pairs. These operations add overhead. The star schema does not eliminate the joins needed to connect diagnoses and procedures, and the small dataset offers little opportunity for dimensional modeling to improve performance.
-
-## Question 3: 30-Day Readmission Rate
-
-### The SQL (optimized for star schema)
+### Q3 (Phase 1)
 
 ```sql
 SELECT
@@ -136,26 +352,7 @@ ORDER BY
     s.specialty_name;
 ```
 
-### 1. Execution time estimate
-
-- Star schema: ~0.322 ms
-- Original OLTP schema: ~0.682 ms
-
-### 2. Improvement factor
-
-The star schema was approximately **2.12× faster** in this test.
-
-Calculation: 0.682 / 0.322 ≈ 2.12.
-
-### 3. Explanation
-
-The fact table stores patient, specialty, and encounter type keys, allowing the query to retrieve the relevant data with fewer joins to normalized OLTP tables. The execution plan uses indexes to locate inpatient encounters and search for subsequent encounters by patient and datetime.
-
-The self-join on the fact table is still necessary to identify readmissions. In this small dataset, the indexed lookup helps reduce the time required for that search.
-
-## Question 4: Revenue by Specialty and Month
-
-### The SQL (optimized for star schema)
+### Q4 (Phase 1)
 
 ```sql
 SELECT
@@ -180,22 +377,3 @@ ORDER BY
     claim_month,
     total_allowed_revenue DESC;
 ```
-
-### 1. Execution time estimate
-
-- Star schema: ~0.275 ms
-- Original OLTP schema: ~0.247 ms
-
-### 2. Improvement factor
-
-The star schema was approximately **1.11× slower** in this test.
-
-Calculation: 0.275 / 0.247 ≈ 1.11.
-
-### 3. Explanation
-
-The billing fact table stores allowed amounts and a claim-date key. The encounter fact table connects billing records to specialties, while the date dimension provides year and month attributes.
-
-MySQL uses primary-key lookups to retrieve the related encounters, specialties, and dates. It then creates a temporary table to aggregate revenue and sorts the results.
-
-Although the star schema provides a clear structure for analytical reporting, it was slightly slower in this test. With only two billing records, the dataset is too small to demonstrate a meaningful performance benefit.
